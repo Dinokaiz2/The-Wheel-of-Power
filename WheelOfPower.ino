@@ -2,18 +2,19 @@
 #include <LoRa.h>
 #include <SPI.h>
 #include <TimerOne.h>
+#include <stdlib.h>
 
 #define MOTOR_DEBUG
 #define LORA_DEBUG
 // #define ACCEL_DEBUG
 
-#define LORA_CS A1
-#define LORA_RST A2
-#define LORA_DIO0 3
+#define LORA_CS 4
+#define LORA_RST 3
+#define LORA_DIO0 2
 #define LORA_SYNC_WORD 0xF3
 
 LIS331 accel;
-#define ACCEL_CS A0
+#define ACCEL_CS 7
 
 #define MOSI 11
 #define MISO 12
@@ -22,7 +23,7 @@ LIS331 accel;
 #define MOTOR_L 9
 #define MOTOR_R 10
 
-#define MELTY_LED_PIN 3
+#define MELTY_LED_PIN 8
 
 #define MOTOR_FREQ 4000.0
 #define MOTOR_PERIOD (1 / MOTOR_FREQ * 1000000) // 250 us
@@ -71,11 +72,11 @@ typedef struct {
 
 void setup()
 {
-  #if defined(LORA_DEBUG) || defined(ACCEL_DEBUG)
+  #if defined(LORA_DEBUG) || defined(ACCEL_DEBUG) || defined(MOTOR_DEBUG)
     Serial.begin(115200);
   #endif
   initMotors();
-  initAccelerometer();
+  // initAccelerometer();
   initLoRa();
   pinMode(MELTY_LED_PIN, OUTPUT);
 }
@@ -86,31 +87,32 @@ void loop()
   static ControllerState* lastControllerState = calloc(1, sizeof(ControllerState));
   static AccelState* accelState = calloc(1, sizeof(AccelState));
   static RobotState* robotState = calloc(1, sizeof(RobotState));
-  accelRecv(accelState);
-  getControllerState(&controllerState, &lastControllerState);
+  // accelRecv(accelState);
+  // getControllerState(&controllerState, &lastControllerState);
+  loRaRecv();
   if (controllerState->bButton) robotState->mode = TANK;
   else if (controllerState->aButton || controllerState->bButton || controllerState->yButton) robotState->mode = MELTY;
   
-  Serial.print(controllerState->timestamp); Serial.print(", ");
-  Serial.print(controllerState->leftX); Serial.print(", ");
-  Serial.print(controllerState->leftY); Serial.print(", ");
-  Serial.print(controllerState->rightX); Serial.print(", ");
-  Serial.print(controllerState->leftBumper); Serial.print(", ");
-  Serial.print(controllerState->rightBumper); Serial.print(", ");
-  Serial.print(controllerState->aButton); Serial.print(", ");
-  Serial.print(controllerState->bButton); Serial.print(", ");
-  Serial.print(controllerState->xButton); Serial.print(", ");
-  Serial.print(controllerState->yButton); Serial.print(", ");
-  Serial.print(robotState->mode == MELTY ? "MELTY" : "TANK");
+  // Serial.print(controllerState->timestamp); Serial.print(", ");
+  // Serial.print(controllerState->leftX); Serial.print(", ");
+  // Serial.print(controllerState->leftY); Serial.print(", ");
+  // Serial.print(controllerState->rightX); Serial.print(", ");
+  // Serial.print(controllerState->leftBumper); Serial.print(", ");
+  // Serial.print(controllerState->rightBumper); Serial.print(", ");
+  // Serial.print(controllerState->aButton); Serial.print(", ");
+  // Serial.print(controllerState->bButton); Serial.print(", ");
+  // Serial.print(controllerState->xButton); Serial.print(", ");
+  // Serial.print(controllerState->yButton); Serial.print(", ");
+  // Serial.print(robotState->mode == MELTY ? "MELTY" : "TANK");
 
-  if (robotState->mode == TANK) curvatureDrive(controllerState);
-  else meltyDrive(robotState, controllerState, lastControllerState, accelState);
+  // if (robotState->mode == TANK) curvatureDrive(controllerState);
+  // else meltyDrive(robotState, controllerState, lastControllerState, accelState);
 }
 
 void initMotors()
 {
   Timer1.initialize(MOTOR_PERIOD);
-  // Timer1.pwm(MOTOR_R, NEUTRAL_THROTTLE);
+  // Timer1.pwm(MOTOR_R, NEUTRAL_THROTTLE); // TODO: add back in?
   // Timer1.pwm(MOTOR_L, NEUTRAL_THROTTLE);
   #ifdef MOTOR_DEBUG
     Serial.println("Motors initialized");
@@ -121,7 +123,7 @@ void initAccelerometer()
 {
   pinMode(ACCEL_CS, OUTPUT);
   digitalWrite(ACCEL_CS, HIGH);
-  pinMode(MOSI, OUTPUT); // TODO: necessary?
+  pinMode(MOSI, OUTPUT);
   pinMode(MISO, INPUT);
   pinMode(SCK, OUTPUT);
   SPI.begin();
@@ -141,22 +143,26 @@ void initLoRa()
     Serial.print("LoRa initializing");
   #endif // LORA_DEBUG
   while (!LoRa.begin(915E6)) {
-    #ifdef LORA_DEBUG
-      Serial.print(".");
+    #ifdef LORA_DEBUG 
+      Serial.print("."); // TODO: LED code for LoRa failure?
     #endif // LORA_DEBUG
-    delay(500); // TODO: Quicken
+    delay(500);
   }
-  LoRa.setSyncWord(LORA_SYNC_WORD);
+  LoRa.setSyncWord(LORA_SYNC_WORD); // TODO: not necessary anymore?
+  LoRa.setTimeout(5); // TODO: might be making every loop w/ new packet take 5ms longer
   #ifdef LORA_DEBUG
     Serial.println("\nLoRa initialized");
   #endif // LORA_DEBUG
 }
 
 /**
+ * TODO: figure out errors: LoRa.enableCrc(), i think crc might be off by default, do we need to check for crc ok ourselves?
+ * TODO: improve speed: reduce packet size, learn about and jiggle bandwidth, spreading factor
  * @return the packet if there was a new one, the empty string otherwise
  */
 String loRaRecv()
 {
+  Serial.println("recv");
   #ifdef LORA_DEBUG
     long recvStart = micros();
   #endif
@@ -164,29 +170,28 @@ String loRaRecv()
   String packetStr = "";
   if (packetSize) {
     #ifdef LORA_DEBUG
-      Serial.print("Received packet: ");
+      Serial.print("Received packet: \"");
     #endif
-    while (LoRa.available()) {
-      packetStr = LoRa.readString();
-      #ifdef LORA_DEBUG
-        Serial.print(packetStr);
-      #endif
-    }
+    while (LoRa.available()) packetStr = LoRa.readString(); // TODO: switch to read() into char buffer, gets rid of setTimeout stuff
     #ifdef LORA_DEBUG
-      long recvEnd = micros();
-      Serial.print("\tRSSI: ");
+      static lastPacketTime = millis();
+      Serial.print(packetStr);
+      Serial.print("\", RSSI: ");
       Serial.print(LoRa.packetRssi());
-      Serial.print(" dBm\tTime: ");
-      Serial.print(recvEnd - recvStart);
-      Serial.println(" us\t");
-    #endif
+      Serial.print(" dBm, Rx time: ");
+      Serial.print(micros() - recvStart);
+      Serial.print(" us, Since last: ");
+      Serial.print(millis() - lastPacketTime);
+      Serial.println("ms");
+      lastPacketTime = millis();
+    #endif // LORA_DEBUG
   }
-  return;
+  return packetStr;
 }
 
 bool loRaAvailable()
 {
-  int packetSize = LoRa.parsePacket();
+  int packetSize = LoRa.parsePacket(); // TODO: learn about this and why we need it?
   if (packetSize) return true;
   else return false;
 }
@@ -204,16 +209,25 @@ void accelRecv(AccelState* accelState)
   #endif
 }
 
+// TODO: call loRaRecv(), which should read a binary packet into a char buffer
+// then pass that sequence to parseControllerState() which puts it in a ControllerState
 void getControllerState(ControllerState** controllerState, ControllerState** lastControllerState)
 {
+  // TODO: probably worth making sure that this isn't copying more than i expect
+  // TODO: i could probably make this faster if i don't worry about memory use so much
   if (loRaAvailable()) {
     parseControllerState(*lastControllerState);
     ControllerState* temp = *controllerState;
     *controllerState = *lastControllerState;
     *lastControllerState = temp;
-  } else return;
+  } else if (memcmp(*controllerState, *lastControllerState, sizeof(ControllerState)) != 0)
+    memcpy(*lastControllerState, *controllerState, sizeof(ControllerState));
 }
 
+/**
+ * Parses a packet from LoRa and reads it into the specified ControllerState.
+ * Precondition: packet waiting in LoRa buffer
+ */
 void parseControllerState(ControllerState* controllerState)
 {
   // TODO: switch to binary
@@ -237,8 +251,9 @@ void parseControllerState(ControllerState* controllerState)
   }
 }
 
-void meltyDrive(RobotState* robotState, ControllerState* controllerState,
-                ControllerState* lastControllerState, AccelState* accelState) {
+// TODO: Optimize
+// Benchmark, make changes from float to integer math
+void meltyDrive(RobotState* robotState, ControllerState* controllerState, ControllerState* lastControllerState, AccelState* accelState) {
   if (controllerState->rightBumper && !lastControllerState->rightBumper) {
     robotState->throttle += 5;
     Serial.print(", increasing throttle, ");
