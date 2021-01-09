@@ -261,7 +261,7 @@ void LIS331::intSrcConfig(int_sig_src src, uint8_t pin)
 // Fixed, sets BDU high
 void LIS331::setFullScale(fs_range range)
 {
-  #pragma message ( "C Preprocessor got here!" )
+  #pragma message ("C Preprocessor got here!")
   uint8_t data;
   LIS331_read(CTRL_REG4, &data, 1);
   data &= ~0x30;

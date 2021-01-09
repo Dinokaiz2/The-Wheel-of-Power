@@ -1,11 +1,17 @@
+// LoRa plan
+// get an idea of how often corruption happen and what they look like (print recvs)
+// enableCrc and mess with it until errors look like they decrease
+// monitor speed during this, see if time gets increased
+// if errors can definitely be 100% eliminated, switch to binary
+
 #include <SparkFun_LIS331.h>
 #include <LoRa.h>
 #include <SPI.h>
 #include <TimerOne.h>
 #include <stdlib.h>
 
-#define MOTOR_DEBUG
-#define LORA_DEBUG
+// #define MOTOR_DEBUG
+// #define LORA_DEBUG
 // #define ACCEL_DEBUG
 
 #define LORA_CS 4
@@ -31,10 +37,14 @@ LIS331 accel;
 
 #define MELTY 0
 #define TANK 1
+#define NO_PWM 2
 
 #define NEUTRAL_THROTTLE 753
 
-#define ACCELEROMETER_RADIUS 0.05647
+#define ACCELEROMETER_RADIUS 0.06033
+
+// angle between LED and actual front of the robot
+#define MELTY_LED_OFFSET -0.5497787 // radians (CCW is +)
 
 typedef struct {
   int16_t throttle;
@@ -76,7 +86,7 @@ void setup()
     Serial.begin(115200);
   #endif
   initMotors();
-  // initAccelerometer();
+  initAccelerometer();
   initLoRa();
   pinMode(MELTY_LED_PIN, OUTPUT);
 }
@@ -87,26 +97,17 @@ void loop()
   static ControllerState* lastControllerState = calloc(1, sizeof(ControllerState));
   static AccelState* accelState = calloc(1, sizeof(AccelState));
   static RobotState* robotState = calloc(1, sizeof(RobotState));
-  // accelRecv(accelState);
-  // getControllerState(&controllerState, &lastControllerState);
-  loRaRecv();
+  
+  accelRecv(accelState);
+  getControllerState(&controllerState, &lastControllerState);
+
   if (controllerState->bButton) robotState->mode = TANK;
   else if (controllerState->aButton || controllerState->bButton || controllerState->yButton) robotState->mode = MELTY;
-  
-  // Serial.print(controllerState->timestamp); Serial.print(", ");
-  // Serial.print(controllerState->leftX); Serial.print(", ");
-  // Serial.print(controllerState->leftY); Serial.print(", ");
-  // Serial.print(controllerState->rightX); Serial.print(", ");
-  // Serial.print(controllerState->leftBumper); Serial.print(", ");
-  // Serial.print(controllerState->rightBumper); Serial.print(", ");
-  // Serial.print(controllerState->aButton); Serial.print(", ");
-  // Serial.print(controllerState->bButton); Serial.print(", ");
-  // Serial.print(controllerState->xButton); Serial.print(", ");
-  // Serial.print(controllerState->yButton); Serial.print(", ");
-  // Serial.print(robotState->mode == MELTY ? "MELTY" : "TANK");
+  // else if (controllerState->yButton) robotState->mode = NO_PWM;
 
-  // if (robotState->mode == TANK) curvatureDrive(controllerState);
-  // else meltyDrive(robotState, controllerState, lastControllerState, accelState);
+  if (robotState->mode == TANK) curvatureDrive(controllerState);
+  else if (robotState->mode == MELTY) meltyDrive(robotState, controllerState, lastControllerState, accelState);
+  // else if (robotState->mode == NO_PWM) digitalWrite(MELTY_LED_PIN, HIGH);
 }
 
 void initMotors()
@@ -128,7 +129,11 @@ void initAccelerometer()
   pinMode(SCK, OUTPUT);
   SPI.begin();
   accel.setSPICSPin(ACCEL_CS);
-  accel.begin(LIS331::USE_SPI);
+  while (!accel.begin(LIS331::USE_SPI)) {
+    #ifdef ACCEL_DEBUG
+      Serial.println("Accelerometer initialization failed. Retrying...");
+    #endif // ACCEL_DEBUG
+  }
   accel.setODR(accel.DR_1000HZ);
   accel.setFullScale(accel.HIGH_RANGE);
   #ifdef ACCEL_DEBUG
@@ -148,7 +153,6 @@ void initLoRa()
     #endif // LORA_DEBUG
     delay(500);
   }
-  LoRa.setSyncWord(LORA_SYNC_WORD); // TODO: not necessary anymore?
   LoRa.setTimeout(5); // TODO: might be making every loop w/ new packet take 5ms longer
   #ifdef LORA_DEBUG
     Serial.println("\nLoRa initialized");
@@ -158,11 +162,11 @@ void initLoRa()
 /**
  * TODO: figure out errors: LoRa.enableCrc(), i think crc might be off by default, do we need to check for crc ok ourselves?
  * TODO: improve speed: reduce packet size, learn about and jiggle bandwidth, spreading factor
+ *    on frames we get packets, the frame takes ~20ms, normal frames are ~4ms
  * @return the packet if there was a new one, the empty string otherwise
  */
 String loRaRecv()
 {
-  Serial.println("recv");
   #ifdef LORA_DEBUG
     long recvStart = micros();
   #endif
@@ -174,7 +178,7 @@ String loRaRecv()
     #endif
     while (LoRa.available()) packetStr = LoRa.readString(); // TODO: switch to read() into char buffer, gets rid of setTimeout stuff
     #ifdef LORA_DEBUG
-      static lastPacketTime = millis();
+      static long lastPacketTime = millis();
       Serial.print(packetStr);
       Serial.print("\", RSSI: ");
       Serial.print(LoRa.packetRssi());
@@ -205,7 +209,8 @@ void accelRecv(AccelState* accelState)
     Serial.print("\tY: ");
     Serial.print(accelState->y);
     Serial.print("\tZ: ");
-    Serial.println(accelState->z);
+    Serial.print(accelState->z);
+    Serial.print("\tflags: ");
   #endif
 }
 
@@ -215,6 +220,9 @@ void getControllerState(ControllerState** controllerState, ControllerState** las
 {
   // TODO: probably worth making sure that this isn't copying more than i expect
   // TODO: i could probably make this faster if i don't worry about memory use so much
+  //       idea: memcopy controllerState to lastControllerState, then read into controllerState
+  //              - no more memcmp
+  //              - still have to copy memory, but have to anyway
   if (loRaAvailable()) {
     parseControllerState(*lastControllerState);
     ControllerState* temp = *controllerState;
@@ -231,8 +239,10 @@ void getControllerState(ControllerState** controllerState, ControllerState** las
 void parseControllerState(ControllerState* controllerState)
 {
   // TODO: switch to binary
+  // TODO: deadzone
   while (LoRa.available()) {
     if (LoRa.read() == 'z') {
+      // Serial.println("Got a packet");
       controllerState->timestamp = millis();
       controllerState->leftX = LoRa.parseFloat();
       controllerState->leftY = LoRa.parseFloat();
@@ -242,7 +252,7 @@ void parseControllerState(ControllerState* controllerState)
       controllerState->aButton = LoRa.parseInt() ? true : false;
       controllerState->bButton = LoRa.parseInt() ? true : false;
       controllerState->xButton = LoRa.parseInt() ? true : false;
-      controllerState->yButton = false; // LoRa.parseInt() ? true : false;
+      controllerState->yButton = LoRa.parseInt() ? true : false;
       // controllerState->dpadLeft = LoRa.parseInt();
       // controllerState->dpadRight = LoRa.parseInt();
       // controllerState->dpadUp = LoRa.parseInt();
@@ -256,7 +266,6 @@ void parseControllerState(ControllerState* controllerState)
 void meltyDrive(RobotState* robotState, ControllerState* controllerState, ControllerState* lastControllerState, AccelState* accelState) {
   if (controllerState->rightBumper && !lastControllerState->rightBumper) {
     robotState->throttle += 5;
-    Serial.print(", increasing throttle, ");
     robotState->attacking = false;
   }
   if (controllerState->leftBumper && !lastControllerState->leftBumper) {
@@ -300,7 +309,7 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
   }
 
   // calculate change in angle
-  float cenAcc = accelUnitsToMS2(accelState->x);
+  float cenAcc = accelUnitsToMS2(sqrt(fabs((long)accelState->x * (long)accelState->x + (long)accelState->y * (long)accelState->y)));
   float angularVel = sqrt(fabs(cenAcc / (ACCELEROMETER_RADIUS))); //  + robotState->radiusTrim)));
   float deltaAngle = ((angularVel + robotState->angularVel) * 0.5) * (deltaTime * 0.000001);
   robotState->angle += deltaAngle;
@@ -313,33 +322,30 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
 
   // Serial.println("xAccel:  " + String(xAccel) + "\ttrim:  " + String(radiusFudge, 5) + "\tthrottle:  " + String(throttle));
 
-  robotState->throttle = constrain(robotState->throttle, 753, 1023);
-  
+  robotState->throttle = constrain(robotState->throttle, NEUTRAL_THROTTLE, 1023);
   // draw arc
-  if (fmod(robotState->angle, 2.0 * PI) > 1.5 * PI) digitalWrite(MELTY_LED_PIN, HIGH);
+  if (fmod(robotState->angle, 2.0 * PI) > (1.25 * PI) + MELTY_LED_OFFSET && fmod(robotState->angle, 2.0 * PI) < (1.75 * PI) + MELTY_LED_OFFSET) digitalWrite(MELTY_LED_PIN, HIGH);
   else digitalWrite(MELTY_LED_PIN, LOW);
 
   // set motor speed
   if (millis() - controllerState->timestamp > 1000) {
     robotState->throttle = NEUTRAL_THROTTLE;
-    Timer1.pwm(MOTOR_L, robotState->throttle);
-    Timer1.pwm(MOTOR_R, robotState->throttle);
-  }
-  else {
+    setMotorsMelty(robotState->throttle, robotState->throttle);
+  } else {
     if (fabs(controllerState->leftX) < 0.1 && fabs(controllerState->leftY) < 0.1) {
-      Timer1.pwm(MOTOR_L, robotState->throttle);
-      Timer1.pwm(MOTOR_R, robotState->throttle);
-    } else if (angleDifference > PI * 0.5) {
-      Timer1.pwm(MOTOR_L, min(robotState->throttle + ((robotState->throttle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.9)), 1023));
-      Timer1.pwm(MOTOR_R, max(robotState->throttle - ((robotState->throttle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.9)), NEUTRAL_THROTTLE));
+      setMotorsMelty(robotState->throttle, robotState->throttle);
     } else {
-      Timer1.pwm(MOTOR_L, max(robotState->throttle - ((robotState->throttle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.9)), NEUTRAL_THROTTLE));
-      Timer1.pwm(MOTOR_R, min(robotState->throttle + ((robotState->throttle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.9)), 1023));
+      int deflection = ((robotState->throttle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.9));
+      if (angleDifference > PI * 0.5) setMotorsMelty(robotState->throttle + deflection, robotState->throttle - deflection);
+      else setMotorsMelty(robotState->throttle - deflection, robotState->throttle + deflection);
     }
   }
+}
 
-  Serial.print(", t: ");
-  Serial.println(robotState->throttle);
+// NEUTRAL_THROTTLE...1023
+void setMotorsMelty(int leftPower, int rightPower) {
+  Timer1.pwm(MOTOR_L, constrain(leftPower, NEUTRAL_THROTTLE, 1023));
+  Timer1.pwm(MOTOR_R, constrain(rightPower, NEUTRAL_THROTTLE, 1023));
 }
 
 float quickStopThreshold = 0.2;
@@ -412,7 +418,7 @@ void curvatureDrive(ControllerState* controllerState) {
   Serial.println(fmap(rightPower, -1, 1, 793, 713));
 }
 
-float accelUnitsToMS2(int nativeUnits) {
+float accelUnitsToMS2(float nativeUnits) {
   return ((400.0 * (float)nativeUnits) / 2047) * 9.80665;
 }
 
