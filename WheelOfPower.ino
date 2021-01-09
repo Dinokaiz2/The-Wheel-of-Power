@@ -35,9 +35,9 @@ LIS331 accel;
 #define MOTOR_PERIOD (1 / MOTOR_FREQ * 1000000) // 250 us
 #define MOTOR_RES 10
 
-#define MELTY 0
-#define TANK 1
-#define NO_PWM 2
+#define NO_PWM 0
+#define MELTY 1
+#define TANK 2
 
 #define NEUTRAL_THROTTLE 753
 
@@ -102,12 +102,12 @@ void loop()
   getControllerState(&controllerState, &lastControllerState);
 
   if (controllerState->bButton) robotState->mode = TANK;
-  else if (controllerState->aButton || controllerState->bButton || controllerState->yButton) robotState->mode = MELTY;
-  // else if (controllerState->yButton) robotState->mode = NO_PWM;
+  else if (controllerState->aButton || controllerState->bButton) robotState->mode = MELTY;
+  else if (controllerState->yButton) robotState->mode = NO_PWM;
 
   if (robotState->mode == TANK) curvatureDrive(controllerState);
   else if (robotState->mode == MELTY) meltyDrive(robotState, controllerState, lastControllerState, accelState);
-  // else if (robotState->mode == NO_PWM) digitalWrite(MELTY_LED_PIN, HIGH);
+  else if (robotState->mode == NO_PWM) digitalWrite(MELTY_LED_PIN, HIGH);
 }
 
 void initMotors()
