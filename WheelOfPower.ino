@@ -278,13 +278,13 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
     robotState->throttle = NEUTRAL_THROTTLE;
     robotState->attacking = false;
   } else if (controllerState->xButton) {
-    robotState->throttle = 823; // good power
+    robotState->throttle = 788; // good power (tested with 50-250)
     robotState->attacking = false;
   } else if (controllerState->yButton) {
     robotState->throttle = 1023; // max power
     robotState->attacking = true;
   } else if (!controllerState->yButton && lastControllerState->yButton) {
-    robotState->throttle = 823; // good power
+    robotState->throttle = 788; // good power (tested with 50-250)
     robotState->attacking = false;
   }
 
@@ -335,9 +335,9 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
     if (fabs(controllerState->leftX) < 0.1 && fabs(controllerState->leftY) < 0.1) {
       setMotorsMelty(robotState->throttle, robotState->throttle);
     } else {
-      int deflection = ((robotState->throttle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.9));
-      if (angleDifference > PI * 0.5) setMotorsMelty(robotState->throttle + deflection, robotState->throttle - deflection);
-      else setMotorsMelty(robotState->throttle - deflection, robotState->throttle + deflection);
+      int deflection = ((robotState->throttle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.5));
+      if (angleDifference > PI * 0.5) setMotorsMelty(robotState->throttle + (deflection * 3), robotState->throttle - deflection);
+      else setMotorsMelty(robotState->throttle - deflection, robotState->throttle + (deflection * 3));
     }
   }
 }
