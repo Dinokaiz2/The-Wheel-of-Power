@@ -5,7 +5,7 @@
 // if errors can definitely be 100% eliminated, switch to binary
 
 #include <SparkFun_LIS331.h>
-#include <LoRa.h>
+#include <RH_RF95.h>
 #include <SPI.h>
 #include <TimerOne.h>
 #include <stdlib.h>
@@ -14,13 +14,16 @@
 // #define LORA_DEBUG
 // #define ACCEL_DEBUG
 
+#define SPI_FREQUENCY 1000000
+
 #define LORA_CS 4
 #define LORA_RST 3
 #define LORA_DIO0 2
-#define LORA_SYNC_WORD 0xF3
+RH_RF95 loRa(LORA_CS, LORA_DIO0);
+// #define LORA_SYNC_WORD 0xF3
 
-LIS331 accel;
 #define ACCEL_CS 7
+LIS331 accel;
 
 #define MOSI 11
 #define MISO 12
@@ -56,6 +59,21 @@ typedef struct {
   float radiusTrim;
   uint8_t mode;
 } RobotState;
+
+typedef struct {
+  byte hash;
+  byte leftX;
+  byte leftY;
+  byte rightX;
+  bool unused : 2;
+  bool yButton : 1;
+  bool xButton : 1;
+  bool bButton : 1;
+  bool aButton : 1;
+  bool rightBumper : 1;
+  bool leftBumper : 1;
+  byte dollar;
+} Packet;
 
 typedef struct {
   unsigned long timestamp;
@@ -97,7 +115,6 @@ void loop()
   static ControllerState* lastControllerState = calloc(1, sizeof(ControllerState));
   static AccelState* accelState = calloc(1, sizeof(AccelState));
   static RobotState* robotState = calloc(1, sizeof(RobotState));
-  
   accelRecv(accelState);
   getControllerState(&controllerState, &lastControllerState);
 
@@ -143,66 +160,30 @@ void initAccelerometer()
 
 void initLoRa()
 {
-  LoRa.setPins(LORA_CS, LORA_RST, LORA_DIO0);
   #ifdef LORA_DEBUG
     Serial.print("LoRa initializing");
   #endif // LORA_DEBUG
-  while (!LoRa.begin(915E6)) {
+  while (!loRa.init()) {
     #ifdef LORA_DEBUG 
       Serial.print("."); // TODO: LED code for LoRa failure?
     #endif // LORA_DEBUG
     delay(500);
   }
-  LoRa.setTimeout(5); // TODO: might be making every loop w/ new packet take 5ms longer
+  loRa.setFrequency(915);
+  loRa.setSignalBandwidth(250000);
+  loRa.setSpreadingFactor(7);
+  loRa.setCodingRate4(5);
   #ifdef LORA_DEBUG
     Serial.println("\nLoRa initialized");
   #endif // LORA_DEBUG
 }
 
-/**
- * TODO: figure out errors: LoRa.enableCrc(), i think crc might be off by default, do we need to check for crc ok ourselves?
- * TODO: improve speed: reduce packet size, learn about and jiggle bandwidth, spreading factor
- *    on frames we get packets, the frame takes ~20ms, normal frames are ~4ms
- * @return the packet if there was a new one, the empty string otherwise
- */
-String loRaRecv()
-{
-  #ifdef LORA_DEBUG
-    long recvStart = micros();
-  #endif
-  int packetSize = LoRa.parsePacket();
-  String packetStr = "";
-  if (packetSize) {
-    #ifdef LORA_DEBUG
-      Serial.print("Received packet: \"");
-    #endif
-    while (LoRa.available()) packetStr = LoRa.readString(); // TODO: switch to read() into char buffer, gets rid of setTimeout stuff
-    #ifdef LORA_DEBUG
-      static long lastPacketTime = millis();
-      Serial.print(packetStr);
-      Serial.print("\", RSSI: ");
-      Serial.print(LoRa.packetRssi());
-      Serial.print(" dBm, Rx time: ");
-      Serial.print(micros() - recvStart);
-      Serial.print(" us, Since last: ");
-      Serial.print(millis() - lastPacketTime);
-      Serial.println("ms");
-      lastPacketTime = millis();
-    #endif // LORA_DEBUG
-  }
-  return packetStr;
-}
-
-bool loRaAvailable()
-{
-  int packetSize = LoRa.parsePacket(); // TODO: learn about this and why we need it?
-  if (packetSize) return true;
-  else return false;
-}
-
 void accelRecv(AccelState* accelState)
 {
+  // Prevents LoRa from taking over SPI from an interrupt while reading accelerometer, which makes the program hang
+  SPI.beginTransaction(SPISettings(SPI_FREQUENCY, MSBFIRST, SPI_MODE0));
   accel.readAxes(accelState->x, accelState->y, accelState->z);
+  SPI.endTransaction();
   #ifdef ACCEL_DEBUG
     Serial.print("X: ");
     Serial.print(accelState->x);
@@ -223,42 +204,40 @@ void getControllerState(ControllerState** controllerState, ControllerState** las
   //       idea: memcopy controllerState to lastControllerState, then read into controllerState
   //              - no more memcmp
   //              - still have to copy memory, but have to anyway
-  if (loRaAvailable()) {
-    parseControllerState(*lastControllerState);
+  Packet* packet = (Packet*)calloc(1, sizeof(Packet)); // TODO: wish this wasn't dynamically allocd
+  uint8_t len = sizeof(Packet); // TODO: this isnt what the docs say to do, but the examples have it
+  if (loRa.recv((uint8_t*)packet, &len)) { // TODO: make sure we received the whole packet (check len?)
+    parseControllerState(packet, *lastControllerState);
     ControllerState* temp = *controllerState;
     *controllerState = *lastControllerState;
     *lastControllerState = temp;
   } else if (memcmp(*controllerState, *lastControllerState, sizeof(ControllerState)) != 0)
     memcpy(*lastControllerState, *controllerState, sizeof(ControllerState));
+  free(packet);
 }
 
 /**
  * Parses a packet from LoRa and reads it into the specified ControllerState.
  * Precondition: packet waiting in LoRa buffer
  */
-void parseControllerState(ControllerState* controllerState)
+void parseControllerState(Packet* packet, ControllerState* controllerState)
 {
   // TODO: switch to binary
   // TODO: deadzone
-  while (LoRa.available()) {
-    if (LoRa.read() == 'z') {
-      // Serial.println("Got a packet");
-      controllerState->timestamp = millis();
-      controllerState->leftX = LoRa.parseFloat();
-      controllerState->leftY = LoRa.parseFloat();
-      controllerState->rightX = LoRa.parseFloat();
-      controllerState->leftBumper = LoRa.parseInt() ? true : false;
-      controllerState->rightBumper = LoRa.parseInt() ? true : false;
-      controllerState->aButton = LoRa.parseInt() ? true : false;
-      controllerState->bButton = LoRa.parseInt() ? true : false;
-      controllerState->xButton = LoRa.parseInt() ? true : false;
-      controllerState->yButton = LoRa.parseInt() ? true : false;
-      // controllerState->dpadLeft = LoRa.parseInt();
-      // controllerState->dpadRight = LoRa.parseInt();
-      // controllerState->dpadUp = LoRa.parseInt();
-      // controllerState->dpadDown = LoRa.parseInt();
-    }
-  }
+  controllerState->timestamp = millis();
+  controllerState->leftX = byteToAxis(packet->leftX);
+  controllerState->leftY = byteToAxis(packet->leftY);
+  controllerState->rightX = byteToAxis(packet->rightX);
+  controllerState->leftBumper = packet->leftBumper ? true : false;
+  controllerState->rightBumper = packet->rightBumper ? true : false;
+  controllerState->aButton = packet->aButton ? true : false;
+  controllerState->bButton = packet->bButton ? true : false;
+  controllerState->xButton = packet->xButton ? true : false;
+  controllerState->yButton = packet->yButton ? true : false;
+}
+
+float byteToAxis(byte axis) {
+  return axis == 127 ? 0 : constrain(((float)axis / 127.5) - 1, -1, 1);
 }
 
 // TODO: Optimize
