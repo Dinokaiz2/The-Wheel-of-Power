@@ -294,6 +294,13 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
   robotState->angle += deltaAngle;
   robotState->angularVel = angularVel;
 
+  // 5 clicks -> 24PI rads/sec
+  constexpr float kF = (24.0 * PI) / 25.0; // kF * throttle = est. angVel
+  float error =  (kF * (robotState->throttle - NEUTRAL_THROTTLE)) - angularVel; // - if too fast, + if too slow
+  constexpr float kP = PI; // positive
+  float output = error * kP; // - if too fast, + if too slow
+  // for every PI rad/s error, change throttle by kP
+
   if (fabs(controllerState->rightX) > 0.1)
     robotState->angle += (-controllerState->rightX * 2 * PI) * (deltaTime * 0.000001);
 
@@ -302,6 +309,7 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
   // Serial.println("xAccel:  " + String(xAccel) + "\ttrim:  " + String(radiusFudge, 5) + "\tthrottle:  " + String(throttle));
 
   robotState->throttle = constrain(robotState->throttle, NEUTRAL_THROTTLE, 1023);
+  int transformedThrottle = constrain(robotState->throttle + output, NEUTRAL_THROTTLE, 1023);
   // draw arc
   if (fmod(robotState->angle, 2.0 * PI) > (1.25 * PI) + MELTY_LED_OFFSET && fmod(robotState->angle, 2.0 * PI) < (1.75 * PI) + MELTY_LED_OFFSET) digitalWrite(MELTY_LED_PIN, HIGH);
   else digitalWrite(MELTY_LED_PIN, LOW);
@@ -312,11 +320,11 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
     setMotorsMelty(robotState->throttle, robotState->throttle);
   } else {
     if (fabs(controllerState->leftX) < 0.1 && fabs(controllerState->leftY) < 0.1) {
-      setMotorsMelty(robotState->throttle, robotState->throttle);
+      setMotorsMelty(transformedThrottle, transformedThrottle);
     } else {
-      int deflection = ((robotState->throttle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.5));
-      if (angleDifference > PI * 0.5) setMotorsMelty(robotState->throttle + (deflection * 3), robotState->throttle - deflection);
-      else setMotorsMelty(robotState->throttle - deflection, robotState->throttle + (deflection * 3));
+      int deflection = ((transformedThrottle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.5));
+      if (angleDifference > PI * 0.5) setMotorsMelty(transformedThrottle + (deflection * 3), transformedThrottle - deflection);
+      else setMotorsMelty(transformedThrottle - deflection, transformedThrottle + (deflection * 3));
     }
   }
 }
@@ -390,11 +398,6 @@ void curvatureDrive(ControllerState* controllerState) {
   if (fabs(rightPower) < 0.05) rightPower = 0.05;
   Timer1.pwm(MOTOR_L, (int)fmap(leftPower, -1, 1, 713, 793));
   Timer1.pwm(MOTOR_R, (int)fmap(rightPower, -1, 1, 793, 713));
-
-  Serial.print("l: ");
-  Serial.print(fmap(leftPower, -1, 1, 713, 793));
-  Serial.print(", r: ");
-  Serial.println(fmap(rightPower, -1, 1, 793, 713));
 }
 
 float accelUnitsToMS2(float nativeUnits) {
