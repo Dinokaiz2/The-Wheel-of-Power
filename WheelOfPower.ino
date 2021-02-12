@@ -32,6 +32,7 @@ LIS331 accel;
 #define MOTOR_L 9
 #define MOTOR_R 10
 
+#define POWER_LED_PIN A0
 #define MELTY_LED_PIN 8
 
 #define MOTOR_FREQ 4000.0
@@ -42,19 +43,19 @@ LIS331 accel;
 #define MELTY 1
 #define TANK 2
 
-#define NEUTRAL_THROTTLE 753
+#define GOOD_POWER 803
+#define NEUTRAL_POWER 753
 
 #define ACCELEROMETER_RADIUS 0.06108
 
-// angle between LED and actual front of the robot
-#define MELTY_LED_OFFSET -0.5497787 // radians (CCW is +)
+// angle between LED and actual front of the robot, in radians (CCW is +)
+#define MELTY_LED_OFFSET -1.0210177 // -0.5497787 (based on CAD) - 27deg CW fudge
 
 typedef struct {
-  int16_t throttle;
+  int16_t power;
   float angle;
   float angularVel;
   long lastMeltyFrameTime; // us
-  bool attacking;
   int attackMod;
   float radiusTrim;
   uint8_t mode;
@@ -110,6 +111,8 @@ void setup()
   initAccelerometer();
   initLoRa();
   pinMode(MELTY_LED_PIN, OUTPUT);
+  pinMode(POWER_LED_PIN, OUTPUT);
+  digitalWrite(POWER_LED_PIN, HIGH);
 }
 
 void loop()
@@ -123,7 +126,6 @@ void loop()
 
   if (controllerState->bButton) robotState->mode = TANK;
   else if (controllerState->aButton || controllerState->bButton || controllerState->yButton) robotState->mode = MELTY;
-  // else if (controllerState->yButton) robotState->mode = NO_PWM;
 
   if (robotState->mode == TANK) curvatureDrive(controllerState);
   else if (robotState->mode == MELTY) meltyDrive(robotState, controllerState, lastControllerState, accelState);
@@ -133,8 +135,8 @@ void loop()
 void initMotors()
 {
   Timer1.initialize(MOTOR_PERIOD);
-  // Timer1.pwm(MOTOR_R, NEUTRAL_THROTTLE); // TODO: add back in?
-  // Timer1.pwm(MOTOR_L, NEUTRAL_THROTTLE);
+  // Timer1.pwm(MOTOR_R, NEUTRAL_POWER); // TODO: add back in?
+  // Timer1.pwm(MOTOR_L, NEUTRAL_POWER);
   #ifdef MOTOR_DEBUG
     Serial.println("Motors initialized");
   #endif // MOTOR_DEBUG
@@ -168,7 +170,7 @@ void initLoRa()
   #endif // LORA_DEBUG
   while (!loRa.init()) {
     #ifdef LORA_DEBUG 
-      Serial.print("."); // TODO: LED code for LoRa failure?
+      Serial.print(".");
     #endif // LORA_DEBUG
     delay(500);
   }
@@ -225,7 +227,6 @@ void getControllerState(ControllerState** controllerState, ControllerState** las
  */
 void parseControllerState(Packet* packet, ControllerState* controllerState)
 {
-  // TODO: switch to binary
   // TODO: deadzone
   controllerState->timestamp = millis();
   controllerState->leftX = byteToAxis(packet->leftX);
@@ -248,29 +249,14 @@ float byteToAxis(byte axis) {
 // TODO: Optimize
 // Benchmark, make changes from float to integer math
 void meltyDrive(RobotState* robotState, ControllerState* controllerState, ControllerState* lastControllerState, AccelState* accelState) {
-  if (controllerState->rightBumper && !lastControllerState->rightBumper) {
-    robotState->throttle += 5;
-    robotState->attacking = false;
-  }
-  if (controllerState->leftBumper && !lastControllerState->leftBumper) {
-    robotState->throttle -= 5;
-    robotState->attacking = false;
-  }
-  robotState->throttle = constrain(robotState->throttle, NEUTRAL_THROTTLE, 1023);
+  if (controllerState->rightBumper && !lastControllerState->rightBumper) robotState->power += 5;
+  if (controllerState->leftBumper && !lastControllerState->leftBumper) robotState->power -= 5;
+  robotState->power = constrain(robotState->power, NEUTRAL_POWER, 1023);
 
-  if (controllerState->aButton) {
-    robotState->throttle = NEUTRAL_THROTTLE;
-    robotState->attacking = false;
-  } else if (controllerState->xButton) {
-    robotState->throttle = 803; // good power (tested with 50-250)
-    robotState->attacking = false;
-  } else if (controllerState->yButton) {
-    robotState->throttle = 1023; // max power
-    robotState->attacking = true;
-  } else if (!controllerState->yButton && lastControllerState->yButton) {
-    robotState->throttle = 803; // good power (tested with 50-250)
-    robotState->attacking = false;
-  }
+  if (controllerState->aButton) robotState->power = NEUTRAL_POWER;
+  else if (controllerState->xButton) robotState->power = GOOD_POWER;
+  else if (controllerState->yButton) robotState->power = 1023; // max power
+  else if (!controllerState->yButton && lastControllerState->yButton) robotState->power = GOOD_POWER;
 
   if (controllerState->start && !lastControllerState->start) robotState->radiusTrim += 0.00025;
   if (controllerState->back && !lastControllerState->back) robotState->radiusTrim -= 0.00025;
@@ -278,9 +264,8 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
 
   // TODO: move to controller parsing, we only need to do this on new packet
   // float joystickAngle = atan2(controllerState->leftX, -controllerState->leftY);
-  float joystickAngle = atan2(0, -controllerState->leftY); // Decided to only go forward or backward for driver ease-of-use
-  float joystickMagnitude = constrain(sqrt(controllerState->leftX * controllerState->leftX
-                                          + controllerState->leftY * controllerState->leftY), 0, 1);
+  float joystickAngle = atan2(0, -controllerState->leftY); // Decided to only go forward or backward to simplify driving
+  float joystickMagnitude = constrain(sqrt(sq(controllerState->leftX) + sq(controllerState->leftY)), 0, 1);
 
   // log time
   long deltaTime = micros() - robotState->lastMeltyFrameTime;
@@ -289,12 +274,12 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
     // just switched to melty mode, bad frame
     deltaTime = 0;
     robotState->angle = PI * 0.5;
-    robotState->throttle = NEUTRAL_THROTTLE;
+    robotState->power = NEUTRAL_POWER;
   }
 
   // calculate change in angle
-  float cenAcc = accelUnitsToMS2(sqrt(fabs((long)accelState->x * (long)accelState->x + (long)accelState->y * (long)accelState->y)));
-  float angularVel = sqrt(fabs(cenAcc / (ACCELEROMETER_RADIUS + robotState->radiusTrim))); //  + robotState->radiusTrim)));
+  float cenAcc = accelUnitsToMS2(sqrt(fabs(sq((long)accelState->x) + sq((long)accelState->y)))); // TODO: do these have to be longs? probably dont need fabs
+  float angularVel = sqrt(fabs(cenAcc / (ACCELEROMETER_RADIUS + robotState->radiusTrim)));
   float deltaAngle = ((angularVel + robotState->angularVel) * 0.5) * (deltaTime * 0.000001);
   robotState->angle += deltaAngle;
   robotState->angularVel = angularVel;
@@ -304,32 +289,30 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
 
   float angleDifference = fabs(fabs(fmod(robotState->angle, 2 * PI) - joystickAngle) - PI);
 
-  // Serial.println("xAccel:  " + String(xAccel) + "\ttrim:  " + String(radiusFudge, 5) + "\tthrottle:  " + String(throttle));
-
-  robotState->throttle = constrain(robotState->throttle, NEUTRAL_THROTTLE, 1023);
+  robotState->power = constrain(robotState->power, NEUTRAL_POWER, 1023);
   // draw arc
   if (fmod(robotState->angle, 2.0 * PI) > (1.25 * PI) + MELTY_LED_OFFSET && fmod(robotState->angle, 2.0 * PI) < (1.75 * PI) + MELTY_LED_OFFSET) digitalWrite(MELTY_LED_PIN, HIGH);
   else digitalWrite(MELTY_LED_PIN, LOW);
 
   // set motor speed
   if (millis() - controllerState->timestamp > 1000) {
-    robotState->throttle = NEUTRAL_THROTTLE;
-    setMotorsMelty(robotState->throttle, robotState->throttle);
+    robotState->power = NEUTRAL_POWER;
+    setMotorsMelty(robotState->power, robotState->power);
   } else {
     if (fabs(controllerState->leftX) < 0.1 && fabs(controllerState->leftY) < 0.1) {
-      setMotorsMelty(robotState->throttle, robotState->throttle);
+      setMotorsMelty(robotState->power, robotState->power);
     } else {
-      int deflection = ((robotState->throttle - NEUTRAL_THROTTLE) * fmap(joystickMagnitude, 0, 1, 0, 0.5));
-      if (angleDifference > PI * 0.5) setMotorsMelty(robotState->throttle + (deflection * 3), robotState->throttle - deflection); // 50-250
-      else setMotorsMelty(robotState->throttle - deflection, robotState->throttle + (deflection * 3));
+      int deflection = ((robotState->power - NEUTRAL_POWER) * fmap(joystickMagnitude, 0, 1, 0, 0.5));
+      if (angleDifference > PI * 0.5) setMotorsMelty(robotState->power + (deflection * 3), robotState->power - deflection); // 50-250
+      else setMotorsMelty(robotState->power - deflection, robotState->power + (deflection * 3));
     }
   }
 }
 
-// NEUTRAL_THROTTLE...1023
+// NEUTRAL_POWER...1023
 void setMotorsMelty(int leftPower, int rightPower) {
-  Timer1.pwm(MOTOR_L, constrain(leftPower, NEUTRAL_THROTTLE, 1023));
-  Timer1.pwm(MOTOR_R, constrain(rightPower, NEUTRAL_THROTTLE, 1023));
+  Timer1.pwm(MOTOR_L, constrain(leftPower, NEUTRAL_POWER, 1023));
+  Timer1.pwm(MOTOR_R, constrain(rightPower, NEUTRAL_POWER, 1023));
 }
 
 float quickStopThreshold = 0.2;
