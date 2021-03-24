@@ -46,6 +46,8 @@ LIS331 accel;
 #define GOOD_POWER 803
 #define NEUTRAL_POWER 753
 
+// REVERSE DIRECTION: 0.06033 (back 3 times)
+// #define ACCELEROMETER_RADIUS 0.06033
 #define ACCELEROMETER_RADIUS 0.06108
 
 // angle between LED and actual front of the robot, in radians (CCW is +)
@@ -195,8 +197,7 @@ void accelRecv(AccelState* accelState)
     Serial.print("\tY: ");
     Serial.print(accelState->y);
     Serial.print("\tZ: ");
-    Serial.print(accelState->z);
-    Serial.print("\tflags: ");
+    Serial.println(accelState->z);
   #endif
 }
 
@@ -264,6 +265,7 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
 
   // TODO: move to controller parsing, we only need to do this on new packet
   // float joystickAngle = atan2(controllerState->leftX, -controllerState->leftY);
+  // TODO: omnidirectional movement probably won't work right with direction reversed
   float joystickAngle = atan2(0, -controllerState->leftY); // Decided to only go forward or backward to simplify driving
   float joystickMagnitude = constrain(sqrt(sq(controllerState->leftX) + sq(controllerState->leftY)), 0, 1);
 
@@ -285,7 +287,9 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
   robotState->angularVel = angularVel;
 
   if (fabs(controllerState->rightX) > 0.1)
-    robotState->angle += (-controllerState->rightX * 2 * PI * 1.3) * (deltaTime * 0.000001); // rotation speed x1.3
+    robotState->angle += (-controllerState->rightX * 2 * PI * 1.3) * (deltaTime * 0.000001);
+    // robotState->angle += (-controllerState->rightX * 2 * PI * 1.3) * (deltaTime * 0.000001); // rotation speed x1.3
+  // REVERSE DIRECTION: robotState->angle += (controllerState->rightX * 2 * PI * 1.3) * (deltaTime * 0.000001); (negative removed)
 
   float angleDifference = fabs(fabs(fmod(robotState->angle, 2 * PI) - joystickAngle) - PI);
 
@@ -295,6 +299,7 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
   else digitalWrite(MELTY_LED_PIN, LOW);
 
   // set motor speed
+  // REVERSE DIRECTION: use setMotorsMeltyReverse
   if (millis() - controllerState->timestamp > 1000) {
     robotState->power = NEUTRAL_POWER;
     setMotorsMelty(robotState->power, robotState->power);
@@ -313,6 +318,13 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
 void setMotorsMelty(int leftPower, int rightPower) {
   Timer1.pwm(MOTOR_L, constrain(leftPower, NEUTRAL_POWER, 1023));
   Timer1.pwm(MOTOR_R, constrain(rightPower, NEUTRAL_POWER, 1023));
+}
+
+void setMotorsMeltyReverse(int leftPower, int rightPower) {
+  leftPower = NEUTRAL_POWER - (leftPower - NEUTRAL_POWER);
+  rightPower = NEUTRAL_POWER - (rightPower - NEUTRAL_POWER);
+  Timer1.pwm(MOTOR_L, constrain(leftPower, 520, NEUTRAL_POWER));
+  Timer1.pwm(MOTOR_R, constrain(rightPower, 520, NEUTRAL_POWER));
 }
 
 float quickStopThreshold = 0.2;
