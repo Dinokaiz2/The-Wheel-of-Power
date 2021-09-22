@@ -4,11 +4,22 @@
 #include <TimerOne.h>
 #include <stdlib.h>
 
-constexpr bool MOTOR_DEBUG = false;
-constexpr bool LORA_DEBUG = false;
-constexpr bool ACCEL_DEBUG = false;
+// Settings
+constexpr uint16_t GOOD_POWER = 803;
+constexpr uint16_t NEUTRAL_POWER = 753;
+constexpr float TURN_SPEED = 1.3;
 
-constexpr int SPI_FREQUENCY = 1000000;
+constexpr float ACCEL_RADIUS = 0.06108; // meters
+constexpr float ACCEL_RADIUS_REVERSE = 0.06033;
+
+bool ENABLE_TRIM = false;
+
+// Angle between LED and actual front of the robot, in radians (CCW is +)
+constexpr float MELTY_LED_OFFSET = -1.0210177; // -0.5497787 (based on CAD) - 27deg CW fudge
+
+constexpr bool MOTOR_DEBUG = false;
+constexpr bool LORA_DEBUG = true;
+constexpr bool ACCEL_DEBUG = true;
 
 // Pins
 constexpr uint8_t SPI_MOSI = 11;
@@ -32,25 +43,17 @@ constexpr float MOTOR_FREQ = 4000.0;
 constexpr float MOTOR_PERIOD =  (1 / MOTOR_FREQ * 1000000); // 250 us
 constexpr uint8_t MOTOR_RES = 10; // bit resolution
 
+constexpr int SPI_FREQUENCY = 1000000;
+
 enum class Mode { NO_PWM, MELTY, TANK };
-
-constexpr uint16_t GOOD_POWER = 803;
-constexpr uint16_t NEUTRAL_POWER = 753;
-
-// REVERSE DIRECTION: 0.06033 (back 3 times)
-// #define ACCELEROMETER_RADIUS 0.06033
-constexpr float ACCELEROMETER_RADIUS = 0.06108;
-
-// angle between LED and actual front of the robot, in radians (CCW is +)
-constexpr float MELTY_LED_OFFSET = -1.0210177; // -0.5497787 (based on CAD) - 27deg CW fudge
 
 typedef struct {
     int16_t power;
     float angle;
     float angularVel;
     long lastMeltyFrameTime; // us
-    int attackMod;
     float radiusTrim;
+    bool reversed;
     Mode mode;
 } RobotState;
 
@@ -117,7 +120,7 @@ void loop() {
     getControllerState(&controllerState, &lastControllerState);
 
     if (controllerState->bButton) robotState->mode = Mode::TANK;
-    else if (controllerState->aButton || controllerState->bButton || controllerState->yButton) robotState->mode = Mode::MELTY;
+    else if (controllerState->aButton || controllerState->xButton || controllerState->yButton) robotState->mode = Mode::MELTY;
 
     if (robotState->mode == Mode::TANK) curvatureDrive(controllerState);
     else if (robotState->mode == Mode::MELTY) meltyDrive(robotState, controllerState, lastControllerState, accelState);
@@ -231,14 +234,19 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
     else if (controllerState->yButton) robotState->power = 1023; // max power
     else if (!controllerState->yButton && lastControllerState->yButton) robotState->power = GOOD_POWER;
 
-    if (controllerState->start && !lastControllerState->start) robotState->radiusTrim += 0.00025;
-    if (controllerState->back && !lastControllerState->back) robotState->radiusTrim -= 0.00025;
-    if (controllerState->start && controllerState->back) robotState->radiusTrim = 0;
+    if (ENABLE_TRIM) {
+        if (controllerState->start && !lastControllerState->start) robotState->radiusTrim += 0.00025;
+        if (controllerState->back && !lastControllerState->back) robotState->radiusTrim -= 0.00025;
+        if (controllerState->start && controllerState->back) robotState->radiusTrim = 0;
+    } else {
+        if (controllerState->start || controllerState->back) robotState->power = NEUTRAL_POWER;
+        if (controllerState->start) robotState->reversed = false;
+        if (controllerState->back) robotState->reversed = true;
+    }
 
     // TODO: move to controller parsing, we only need to do this on new packet
-    // float joystickAngle = atan2(controllerState->leftX, -controllerState->leftY);
-    // TODO: omnidirectional movement probably won't work right with direction reversed
-    float joystickAngle = atan2(0, -controllerState->leftY); // Decided to only go forward or backward to simplify driving
+    // TODO: omnidirectional movement probably won't work with direction reversed
+    float joystickAngle = atan2(controllerState->leftX, -controllerState->leftY);
     float joystickMagnitude = constrain(sqrt(sq(controllerState->leftX) + sq(controllerState->leftY)), 0, 1);
 
     // log time
@@ -249,18 +257,21 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
         deltaTime = 0;
         robotState->angle = PI * 0.5;
         robotState->power = NEUTRAL_POWER;
+        robotState->reversed = false;
     }
 
     // calculate change in angle
     float cenAcc = accelUnitsToMS2(sqrt(fabs(sq((long)accelState->x) + sq((long)accelState->y)))); // TODO: do these have to be longs? probably dont need fabs
-    float angularVel = sqrt(fabs(cenAcc / (ACCELEROMETER_RADIUS + robotState->radiusTrim)));
+    // TODO: reversing should reverse angularVel, which might make turning right
+    float angularVel = sqrt(fabs(cenAcc / ((robotState->reversed ? ACCEL_RADIUS_REVERSE : ACCEL_RADIUS) + robotState->radiusTrim)));
     float deltaAngle = ((angularVel + robotState->angularVel) * 0.5) * (deltaTime * 0.000001);
     robotState->angle += deltaAngle;
     robotState->angularVel = angularVel;
 
-    if (fabs(controllerState->rightX) > 0.1) robotState->angle += (-controllerState->rightX * 2 * PI * 1.3) * (deltaTime * 0.000001);
-    // robotState->angle += (-controllerState->rightX * 2 * PI * 1.3) * (deltaTime * 0.000001); // rotation speed x1.3
-    // REVERSE DIRECTION: robotState->angle += (controllerState->rightX * 2 * PI * 1.3) * (deltaTime * 0.000001); (negative removed)
+    if (fabs(controllerState->rightX) > 0.1) {
+        if (robotState->reversed) robotState->angle += controllerState->rightX * 2 * PI * TURN_SPEED * deltaTime * 0.000001;
+        else robotState->angle += -controllerState->rightX * 2 * PI * TURN_SPEED * deltaTime * 0.000001;
+    }
 
     float angleDifference = fabs(fabs(fmod(robotState->angle, 2 * PI) - joystickAngle) - PI);
 
@@ -271,32 +282,31 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
     else digitalWrite(MELTY_LED_PIN, LOW);
 
     // set motor speed
-    // REVERSE DIRECTION: use setMotorsMeltyReverse
     if (millis() - controllerState->timestamp > 1000) {
         robotState->power = NEUTRAL_POWER;
-        setMotorsMelty(robotState->power, robotState->power);
+        setMotorsMelty(robotState->power, robotState->power, robotState->reversed);
     } else {
         if (fabs(controllerState->leftX) < 0.1 && fabs(controllerState->leftY) < 0.1) {
-            setMotorsMelty(robotState->power, robotState->power);
+            setMotorsMelty(robotState->power, robotState->power, robotState->reversed);
         } else {
             int deflection = ((robotState->power - NEUTRAL_POWER) * fmap(joystickMagnitude, 0, 1, 0, 0.5));
-            if (angleDifference > PI * 0.5) setMotorsMelty(robotState->power + (deflection * 3), robotState->power - deflection); // 50-250
-            else setMotorsMelty(robotState->power - deflection, robotState->power + (deflection * 3));
+            if (angleDifference > PI * 0.5) setMotorsMelty(robotState->power + (deflection * 3), robotState->power - deflection, robotState->reversed); // 50-250
+            else setMotorsMelty(robotState->power - deflection, robotState->power + (deflection * 3), robotState->reversed);
         }
     }
 }
 
 // NEUTRAL_POWER...1023
-void setMotorsMelty(int leftPower, int rightPower) {
-    Timer1.pwm(MOTOR_L, constrain(leftPower, NEUTRAL_POWER, 1023));
-    Timer1.pwm(MOTOR_R, constrain(rightPower, NEUTRAL_POWER, 1023));
-}
-
-void setMotorsMeltyReverse(int leftPower, int rightPower) {
-    leftPower = NEUTRAL_POWER - (leftPower - NEUTRAL_POWER);
-    rightPower = NEUTRAL_POWER - (rightPower - NEUTRAL_POWER);
-    Timer1.pwm(MOTOR_L, constrain(leftPower, 520, NEUTRAL_POWER));
-    Timer1.pwm(MOTOR_R, constrain(rightPower, 520, NEUTRAL_POWER));
+void setMotorsMelty(int leftPower, int rightPower, bool reversed) {
+    if (reversed) {
+        leftPower = NEUTRAL_POWER - (leftPower - NEUTRAL_POWER);
+        rightPower = NEUTRAL_POWER - (rightPower - NEUTRAL_POWER);
+        Timer1.pwm(MOTOR_L, constrain(leftPower, 520, NEUTRAL_POWER));
+        Timer1.pwm(MOTOR_R, constrain(rightPower, 520, NEUTRAL_POWER));
+    } else {
+        Timer1.pwm(MOTOR_L, constrain(leftPower, NEUTRAL_POWER, 1023));
+        Timer1.pwm(MOTOR_R, constrain(rightPower, NEUTRAL_POWER, 1023));
+    }
 }
 
 float quickStopThreshold = 0.2;
