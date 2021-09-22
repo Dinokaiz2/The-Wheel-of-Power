@@ -8,9 +8,29 @@ import sys
 sys.path.insert(0, "/home/pi/Gamepad")
 import Gamepad
 
+def millis():
+    return int(round(time.time() * 1000))
+
+def clamp(val, low, high):
+    return low if val < low else high if val > high else val
+
+def axis_to_byte(axis):
+    assert axis >= -1 and axis <= 1
+    return 127 if axis == 0 else clamp(int((axis + 1) * 127.5), 0, 255)
+
+def bit_list_to_byte(arr):
+    assert len(arr) <= 8
+    for i in range(len(arr), 8): arr.append(False)
+    byte = 0
+    for bit in arr:
+        byte = (byte << 1) | bit
+    return byte
+
+led = DigitalInOut(board.D17)
+led.direction = Direction.OUTPUT
+
 while True:
     try:
-        millis = lambda: int(round(time.time() * 1000))
         lastTime = millis()
 
         # Configure LoRa
@@ -20,42 +40,27 @@ while True:
         rfm9x = adafruit_rfm9x.RFM9x(spi, CS, RESET, 915.0)
         rfm9x.enable_crc = True
         rfm9x.tx_power = 23
-        # rfm9x.signal_bandwidth = 250000
-        # rfm9x.spreading_factor = 7
-        # rfm9x.coding_rate = 5
-
-        leftX = 0
-        leftY = 0
-        rightX = 0
-        leftBumper = 0
-        rightBumper = 0
-        dpadLeft = 0
-        dpadRight = 0
-        dpadUp = 0
-        dpadDown = 0
-        aButton = 0
-        bButton = 0
-        xButton = 0
-        yButton = 0
+        rfm9x.signal_bandwidth = 250000
+        rfm9x.spreading_factor = 7
+        rfm9x.coding_rate = 5
 
         gamepad = Gamepad.Xbox360()
-        print('Gamepad connected')
+        print("Gamepad connected")
 
         gamepad.startBackgroundUpdates()
-         
+
         while True:
-            leftX = gamepad.axis("LEFT-X")
-            leftY = gamepad.axis("LEFT-Y")
-            rightX = gamepad.axis("RIGHT-X")
-            leftBumper = gamepad.isPressed("LB")
-            rightBumper = gamepad.isPressed("RB")
-            aButton = gamepad.isPressed("A")
-            bButton = gamepad.isPressed("B")
-            xButton = gamepad.isPressed("X")
-            yButton = gamepad.isPressed("Y")
-            packet = "z%0.2f;%0.2f;%0.2f;%d;%d;%d;%d;%d;%d" % (leftX, leftY, rightX, leftBumper, rightBumper, aButton, bButton, xButton, yButton)
-            print(packet + ",", millis() - lastTime, "ms")
+            if not gamepad.isConnected():
+                raise IOError("Gamepad disconnected")
+            led.value = True
+            left_x = axis_to_byte(gamepad.axis("LEFT-X"))
+            left_y = axis_to_byte(gamepad.axis("LEFT-Y"))
+            right_x = axis_to_byte(gamepad.axis("RIGHT-X"))
+            buttons = bit_list_to_byte([gamepad.isPressed(button) for button in ["LB", "RB", "A", "B", "X", "Y", "BACK", "START"]])
+            packet = bytes([35, left_x, left_y, right_x, buttons, 36])
+            print(millis() - lastTime, "ms")
             lastTime = millis()
-            rfm9x.send(bytes(packet, "utf-8"))
-    except:
+            rfm9x.send(packet)
+    except OSError:
         print("No controller, trying again...")
+        led.value = False

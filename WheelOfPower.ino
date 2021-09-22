@@ -204,7 +204,7 @@ void getControllerState(ControllerState** controllerState, ControllerState** las
 void parseControllerState(Packet* packet, ControllerState* controllerState) {
     // TODO: deadzone
     controllerState->timestamp = millis();
-    controllerState->leftX = byteToAxis(packet->leftX);
+    controllerState->leftX = 0; // Only forward and backward translation
     controllerState->leftY = byteToAxis(packet->leftY);
     controllerState->rightX = byteToAxis(packet->rightX);
     controllerState->leftBumper = packet->leftBumper;
