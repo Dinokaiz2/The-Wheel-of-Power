@@ -1,57 +1,48 @@
-// LoRa plan
-// get an idea of how often corruption happen and what they look like (print recvs)
-// enableCrc and mess with it until errors look like they decrease
-// monitor speed during this, see if time gets increased
-// if errors can definitely be 100% eliminated, switch to binary
-
 #include <SparkFun_LIS331.h>
 #include <RH_RF95.h>
 #include <SPI.h>
 #include <TimerOne.h>
 #include <stdlib.h>
 
-// #define MOTOR_DEBUG
-// #define LORA_DEBUG
-// #define ACCEL_DEBUG
+constexpr bool MOTOR_DEBUG = false;
+constexpr bool LORA_DEBUG = false;
+constexpr bool ACCEL_DEBUG = false;
 
-#define SPI_FREQUENCY 1000000
+constexpr int SPI_FREQUENCY = 1000000;
 
-#define LORA_CS 4
-#define LORA_RST 3
-#define LORA_DIO0 2
-RH_RF95 loRa(LORA_CS, LORA_DIO0);
-// #define LORA_SYNC_WORD 0xF3
+// Pins
+constexpr uint8_t SPI_MOSI = 11;
+constexpr uint8_t SPI_MISO = 12;
+constexpr uint8_t SPI_SCK = 13;
 
-#define ACCEL_CS 7
-LIS331 accel;
+constexpr uint8_t LORA_CS = 4;
+constexpr uint8_t LORA_RST = 3;
+constexpr uint8_t LORA_DIO0 = 2;
 
-#define MOSI 11
-#define MISO 12
-#define SCK 13
+constexpr uint8_t ACCEL_CS = 7;
 
-#define MOTOR_L 9
-#define MOTOR_R 10
+constexpr uint8_t MOTOR_L = 9;
+constexpr uint8_t MOTOR_R = 10;
 
-#define POWER_LED_PIN A0
-#define MELTY_LED_PIN 8
+constexpr uint8_t POWER_LED_PIN = A0;
+constexpr uint8_t MELTY_LED_PIN = 8;
 
-#define MOTOR_FREQ 4000.0
-#define MOTOR_PERIOD (1 / MOTOR_FREQ * 1000000) // 250 us
-#define MOTOR_RES 10
+// Oneshot125: 4000 Hz, 50% (125 us) - 100% (250 us) duty
+constexpr float MOTOR_FREQ = 4000.0;
+constexpr float MOTOR_PERIOD =  (1 / MOTOR_FREQ * 1000000); // 250 us
+constexpr uint8_t MOTOR_RES = 10; // bit resolution
 
-#define NO_PWM 0
-#define MELTY 1
-#define TANK 2
+enum class Mode { NO_PWM, MELTY, TANK };
 
-#define GOOD_POWER 803
-#define NEUTRAL_POWER 753
+constexpr uint16_t GOOD_POWER = 803;
+constexpr uint16_t NEUTRAL_POWER = 753;
 
 // REVERSE DIRECTION: 0.06033 (back 3 times)
 // #define ACCELEROMETER_RADIUS 0.06033
-#define ACCELEROMETER_RADIUS 0.06108
+constexpr float ACCELEROMETER_RADIUS = 0.06108;
 
 // angle between LED and actual front of the robot, in radians (CCW is +)
-#define MELTY_LED_OFFSET -1.0210177 // -0.5497787 (based on CAD) - 27deg CW fudge
+constexpr float MELTY_LED_OFFSET = -1.0210177; // -0.5497787 (based on CAD) - 27deg CW fudge
 
 typedef struct {
     int16_t power;
@@ -60,7 +51,7 @@ typedef struct {
     long lastMeltyFrameTime; // us
     int attackMod;
     float radiusTrim;
-    uint8_t mode;
+    Mode mode;
 } RobotState;
 
 typedef struct {
@@ -104,10 +95,11 @@ typedef struct {
     int16_t z;
 } AccelState;
 
+RH_RF95 loRa(LORA_CS, LORA_DIO0);
+LIS331 accel;
+
 void setup() {
-#if defined(LORA_DEBUG) || defined(ACCEL_DEBUG) || defined(MOTOR_DEBUG)
-    Serial.begin(115200);
-#endif
+    if (LORA_DEBUG || ACCEL_DEBUG || MOTOR_DEBUG) Serial.begin(115200);
     initMotors();
     initAccelerometer();
     initLoRa();
@@ -124,60 +116,47 @@ void loop() {
     accelRecv(accelState);
     getControllerState(&controllerState, &lastControllerState);
 
-    if (controllerState->bButton) robotState->mode = TANK;
-    else if (controllerState->aButton || controllerState->bButton || controllerState->yButton) robotState->mode = MELTY;
+    if (controllerState->bButton) robotState->mode = Mode::TANK;
+    else if (controllerState->aButton || controllerState->bButton || controllerState->yButton) robotState->mode = Mode::MELTY;
 
-    if (robotState->mode == TANK) curvatureDrive(controllerState);
-    else if (robotState->mode == MELTY) meltyDrive(robotState, controllerState, lastControllerState, accelState);
-    else if (robotState->mode == NO_PWM) digitalWrite(MELTY_LED_PIN, HIGH);
+    if (robotState->mode == Mode::TANK) curvatureDrive(controllerState);
+    else if (robotState->mode == Mode::MELTY) meltyDrive(robotState, controllerState, lastControllerState, accelState);
+    else if (robotState->mode == Mode::NO_PWM) digitalWrite(MELTY_LED_PIN, HIGH);
 }
 
 void initMotors() {
     Timer1.initialize(MOTOR_PERIOD);
-    // Timer1.pwm(MOTOR_R, NEUTRAL_POWER); // TODO: add back in?
-    // Timer1.pwm(MOTOR_L, NEUTRAL_POWER);
-#ifdef MOTOR_DEBUG
-    Serial.println("Motors initialized");
-#endif // MOTOR_DEBUG
+    if (MOTOR_DEBUG) Serial.println("Motors initialized");
 }
 
 void initAccelerometer() {
     pinMode(ACCEL_CS, OUTPUT);
     digitalWrite(ACCEL_CS, HIGH);
-    pinMode(MOSI, OUTPUT);
-    pinMode(MISO, INPUT);
-    pinMode(SCK, OUTPUT);
+    pinMode(SPI_MOSI, OUTPUT);
+    pinMode(SPI_MISO, INPUT);
+    pinMode(SPI_SCK, OUTPUT);
     SPI.begin();
     accel.setSPICSPin(ACCEL_CS);
     while (!accel.begin(LIS331::USE_SPI)) {
-#ifdef ACCEL_DEBUG
-        Serial.println("Accelerometer initialization failed. Retrying...");
-#endif // ACCEL_DEBUG
+        if (ACCEL_DEBUG) Serial.println("Accelerometer init failed. Retrying...");
+        delay(200);
     }
     accel.setODR(accel.DR_1000HZ);
     accel.setFullScale(accel.HIGH_RANGE);
-#ifdef ACCEL_DEBUG
-    Serial.println("Accelerometer initialized");
-#endif // ACCEL_DEBUG
+    if (ACCEL_DEBUG) Serial.println("Accelerometer initialized");
 }
 
 void initLoRa() {
-#ifdef LORA_DEBUG
-    Serial.print("LoRa initializing");
-#endif // LORA_DEBUG
+    if (LORA_DEBUG) Serial.print("LoRa initializing");
     while (!loRa.init()) {
-#ifdef LORA_DEBUG
-        Serial.print(".");
-#endif // LORA_DEBUG
-        delay(500);
+        if (LORA_DEBUG) Serial.println("LoRa init failed. Retrying...");
+        delay(200);
     }
     loRa.setFrequency(915);
     loRa.setSignalBandwidth(250000);
     loRa.setSpreadingFactor(7);
     loRa.setCodingRate4(5);
-#ifdef LORA_DEBUG
-    Serial.println("\nLoRa initialized");
-#endif // LORA_DEBUG
+    if (LORA_DEBUG) Serial.println("LoRa initialized");
 }
 
 void accelRecv(AccelState* accelState) {
@@ -185,14 +164,14 @@ void accelRecv(AccelState* accelState) {
     SPI.beginTransaction(SPISettings(SPI_FREQUENCY, MSBFIRST, SPI_MODE0));
     accel.readAxes(accelState->x, accelState->y, accelState->z);
     SPI.endTransaction();
-#ifdef ACCEL_DEBUG
-    Serial.print("X: ");
-    Serial.print(accelState->x);
-    Serial.print("\tY: ");
-    Serial.print(accelState->y);
-    Serial.print("\tZ: ");
-    Serial.println(accelState->z);
-#endif
+    if (ACCEL_DEBUG) {
+        Serial.print("X: ");
+        Serial.print(accelState->x);
+        Serial.print("\tY: ");
+        Serial.print(accelState->y);
+        Serial.print("\tZ: ");
+        Serial.println(accelState->z);
+    }
 }
 
 // TODO: call loRaRecv(), which should read a binary packet into a char buffer
@@ -225,16 +204,17 @@ void parseControllerState(Packet* packet, ControllerState* controllerState) {
     controllerState->leftX = byteToAxis(packet->leftX);
     controllerState->leftY = byteToAxis(packet->leftY);
     controllerState->rightX = byteToAxis(packet->rightX);
-    controllerState->leftBumper = packet->leftBumper ? true : false;
-    controllerState->rightBumper = packet->rightBumper ? true : false;
-    controllerState->aButton = packet->aButton ? true : false;
-    controllerState->bButton = packet->bButton ? true : false;
-    controllerState->xButton = packet->xButton ? true : false;
-    controllerState->yButton = packet->yButton ? true : false;
-    controllerState->start = packet->start ? true : false;
-    controllerState->back = packet->back ? true : false;
+    controllerState->leftBumper = packet->leftBumper;
+    controllerState->rightBumper = packet->rightBumper;
+    controllerState->aButton = packet->aButton;
+    controllerState->bButton = packet->bButton;
+    controllerState->xButton = packet->xButton;
+    controllerState->yButton = packet->yButton;
+    controllerState->start = packet->start;
+    controllerState->back = packet->back;
 }
 
+// TODO: Make this a parseControllerState lambda
 float byteToAxis(byte axis) {
     return axis == 127 ? 0 : constrain(((float)axis / 127.5) - 1, -1, 1);
 }
