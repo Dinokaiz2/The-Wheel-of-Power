@@ -14,12 +14,12 @@ constexpr float ACCEL_RADIUS_REVERSE = 0.06033;
 
 bool ENABLE_TRIM = false;
 
-// Angle between LED and actual front of the robot, in radians (CCW is +)
-constexpr float MELTY_LED_OFFSET = -1.0210177; // -0.5497787 (based on CAD) - 27deg CW fudge
+// Angle between LED and weapon (forward), in radians (CCW is +)
+constexpr float MELTY_LED_OFFSET = 2.67035; // 153 degrees CCW
 
 constexpr bool MOTOR_DEBUG = false;
-constexpr bool LORA_DEBUG = true;
-constexpr bool ACCEL_DEBUG = true;
+constexpr bool LORA_DEBUG = false;
+constexpr bool ACCEL_DEBUG = false;
 
 // Pins
 constexpr uint8_t SPI_MOSI = 11;
@@ -40,7 +40,7 @@ constexpr uint8_t MELTY_LED_PIN = 8;
 
 // Oneshot125: 4000 Hz, 50% (125 us) - 100% (250 us) duty
 constexpr float MOTOR_FREQ = 4000.0;
-constexpr float MOTOR_PERIOD =  (1 / MOTOR_FREQ * 1000000); // 250 us
+constexpr float MOTOR_PERIOD = (1 / MOTOR_FREQ * 1000000); // 250 us
 constexpr uint8_t MOTOR_RES = 10; // bit resolution
 
 constexpr int SPI_FREQUENCY = 1000000;
@@ -205,7 +205,7 @@ void parseControllerState(Packet* packet, ControllerState* controllerState) {
     // TODO: deadzone
     controllerState->timestamp = millis();
     controllerState->leftX = 0; // Only forward and backward translation
-    controllerState->leftY = byteToAxis(packet->leftY);
+    controllerState->leftY = -byteToAxis(packet->leftY); // Make +y forward
     controllerState->rightX = byteToAxis(packet->rightX);
     controllerState->leftBumper = packet->leftBumper;
     controllerState->rightBumper = packet->rightBumper;
@@ -231,7 +231,7 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
 
     if (controllerState->aButton) robotState->power = NEUTRAL_POWER;
     else if (controllerState->xButton) robotState->power = GOOD_POWER;
-    else if (controllerState->yButton) robotState->power = 1023; // max power
+    else if (controllerState->yButton) robotState->power = 1023;
     else if (!controllerState->yButton && lastControllerState->yButton) robotState->power = GOOD_POWER;
 
     if (ENABLE_TRIM) {
@@ -244,44 +244,48 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
         if (controllerState->back) robotState->reversed = true;
     }
 
-    // TODO: move to controller parsing, we only need to do this on new packet
-    // TODO: omnidirectional movement probably won't work with direction reversed
-    float joystickAngle = atan2(controllerState->leftX, -controllerState->leftY);
+    // TODO: Move to controller parsing, we only need to do this on new packet
+    float joystickAngle = atan2(controllerState->leftY, controllerState->leftX);
     float joystickMagnitude = constrain(sqrt(sq(controllerState->leftX) + sq(controllerState->leftY)), 0, 1);
 
-    // log time
+    // Get time step
     long deltaTime = micros() - robotState->lastMeltyFrameTime;
     robotState->lastMeltyFrameTime = micros();
     if (deltaTime > 500000) {
-        // just switched to melty mode, bad frame
+        // Just switched to melty mode, bad frame
         deltaTime = 0;
-        robotState->angle = PI * 0.5;
+        robotState->angle = 0;
         robotState->power = NEUTRAL_POWER;
         robotState->reversed = false;
     }
 
-    // calculate change in angle
+    // Calculate change in angle
     float cenAcc = accelUnitsToMS2(sqrt(fabs(sq((long)accelState->x) + sq((long)accelState->y)))); // TODO: do these have to be longs? probably dont need fabs
-    // TODO: reversing should reverse angularVel, which might make turning right
-    float angularVel = sqrt(fabs(cenAcc / ((robotState->reversed ? ACCEL_RADIUS_REVERSE : ACCEL_RADIUS) + robotState->radiusTrim)));
+
+    float angularVel;
+    if (robotState->reversed) angularVel = sqrt(fabs(cenAcc / ACCEL_RADIUS_REVERSE + robotState->radiusTrim)); // CCW
+    else angularVel = -sqrt(fabs(cenAcc / ACCEL_RADIUS + robotState->radiusTrim)); // CW
+
     float deltaAngle = ((angularVel + robotState->angularVel) * 0.5) * (deltaTime * 0.000001);
     robotState->angle += deltaAngle;
     robotState->angularVel = angularVel;
 
-    if (fabs(controllerState->rightX) > 0.1) {
-        if (robotState->reversed) robotState->angle += controllerState->rightX * 2 * PI * TURN_SPEED * deltaTime * 0.000001;
-        else robotState->angle += -controllerState->rightX * 2 * PI * TURN_SPEED * deltaTime * 0.000001;
-    }
+    // Turn heading
+    if (fabs(controllerState->rightX) > 0.1) robotState->angle += controllerState->rightX * 2 * PI * TURN_SPEED * deltaTime * 0.000001;
 
-    float angleDifference = fabs(fabs(fmod(robotState->angle, 2 * PI) - joystickAngle) - PI);
+    auto math_mod = [](float x, float n) { return x - floor(x / n) * n; };
+
+    // Angle from the robot's angle to the joystick's angle, from [-PI, PI)
+    float angleDifference = math_mod((joystickAngle - robotState->angle) + PI, 2 * PI) - PI;
 
     robotState->power = constrain(robotState->power, NEUTRAL_POWER, 1023);
-    // draw arc
-    if (fmod(robotState->angle, 2.0 * PI) > (1.25 * PI) + MELTY_LED_OFFSET && fmod(robotState->angle, 2.0 * PI) < (1.75 * PI) + MELTY_LED_OFFSET)
-        digitalWrite(MELTY_LED_PIN, HIGH);
+
+    // Draw arc
+    float melty_led_angle = math_mod(robotState->angle + MELTY_LED_OFFSET, 2.0 * PI);
+    if (melty_led_angle > 0.25 * PI && melty_led_angle < 0.75 * PI) digitalWrite(MELTY_LED_PIN, HIGH);
     else digitalWrite(MELTY_LED_PIN, LOW);
 
-    // set motor speed
+    // Set motor speed
     if (millis() - controllerState->timestamp > 1000) {
         robotState->power = NEUTRAL_POWER;
         setMotorsMelty(robotState->power, robotState->power, robotState->reversed);
@@ -290,7 +294,7 @@ void meltyDrive(RobotState* robotState, ControllerState* controllerState, Contro
             setMotorsMelty(robotState->power, robotState->power, robotState->reversed);
         } else {
             int deflection = ((robotState->power - NEUTRAL_POWER) * fmap(joystickMagnitude, 0, 1, 0, 0.5));
-            if (angleDifference > PI * 0.5) setMotorsMelty(robotState->power + (deflection * 3), robotState->power - deflection, robotState->reversed); // 50-250
+            if (angleDifference < 0) setMotorsMelty(robotState->power + (deflection * 3), robotState->power - deflection, robotState->reversed); // 50-250
             else setMotorsMelty(robotState->power - deflection, robotState->power + (deflection * 3), robotState->reversed);
         }
     }
@@ -318,7 +322,7 @@ float quickTurnThreshold = 0.2;
 void curvatureDrive(ControllerState* controllerState) {
     float angularPower;
     boolean overPower;
-    float throttle = -controllerState->leftY;
+    float throttle = controllerState->leftY;
     float rotation = controllerState->rightX;
     // rotation *= 0.5;
     if (fabs(throttle) < 0.1) throttle = 0;
