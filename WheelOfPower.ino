@@ -100,17 +100,17 @@ struct Gamepad {
     bool right_trigger;
     bool dpad_left;
     bool dpad_right;
-    bool dpad_up ;
+    bool dpad_up;
     bool dpad_down;
     bool start;
     bool back;
     bool xbox;
 };
 
-struct RawAccel {
-    int16_t x;
-    int16_t y;
-    int16_t z;
+struct Acceleration {
+    float x;
+    float y;
+    float z;
 };
 
 RH_RF95 lora(LORA_CS, LORA_DIO0);
@@ -118,7 +118,7 @@ LIS331 accelerometer;
 
 Gamepad gamepad;
 Gamepad prev_gamepad;
-RawAccel raw_accel;
+Acceleration acceleration;
 Robot robot;
 
 void setup() {
@@ -132,14 +132,14 @@ void setup() {
 }
 
 void loop() {
-    read_accel(&raw_accel);
+    read_accel(&acceleration);
     read_gamepad(&gamepad, &prev_gamepad);
 
     if (gamepad.b) robot.mode = Mode::TANK;
     else if (gamepad.a || gamepad.x || gamepad.y) robot.mode = Mode::MELTY;
 
     if (robot.mode == Mode::TANK) curvature_drive(gamepad);
-    else if (robot.mode == Mode::MELTY) melty_drive(&robot, gamepad, prev_gamepad, raw_accel);
+    else if (robot.mode == Mode::MELTY) melty_drive(&robot, gamepad, prev_gamepad, acceleration);
     else if (robot.mode == Mode::NO_PWM) digitalWrite(MELTY_LED_PIN, HIGH);
 }
 
@@ -178,18 +178,29 @@ void init_lora() {
     if (LORA_DEBUG) Serial.println("LoRa initialized");
 }
 
-void read_accel(RawAccel* raw_accel) {
+void read_accel(Acceleration* acceleration) {
+    int16_t x, y, z;
+
     // Prevents LoRa from taking over SPI from an interrupt while reading accelerometer, which makes the program hang
     SPI.beginTransaction(SPISettings(SPI_FREQUENCY, MSBFIRST, SPI_MODE0));
-    accelerometer.readAxes(raw_accel->x, raw_accel->y, raw_accel->z);
+    accelerometer.readAxes(x, y, z);
     SPI.endTransaction();
+
+    auto accel_units_to_mps2 = [](float native_units) {
+        return ((400.0 * (float)native_units) / 2047) * 9.80665;
+    };
+
+    acceleration->x = accel_units_to_mps2(x);
+    acceleration->y = accel_units_to_mps2(y);
+    acceleration->z = accel_units_to_mps2(z);
+
     if (ACCEL_DEBUG) {
         Serial.print("X: ");
-        Serial.print(raw_accel->x);
+        Serial.print(acceleration->x);
         Serial.print("\tY: ");
-        Serial.print(raw_accel->y);
+        Serial.print(acceleration->y);
         Serial.print("\tZ: ");
-        Serial.println(raw_accel->z);
+        Serial.println(acceleration->z);
     }
 }
 
@@ -227,7 +238,7 @@ void parse_gamepad(Packet packet, Gamepad* gamepad) {
 
 // TODO: Optimize
 // Benchmark, make changes from float to integer math
-void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, RawAccel raw_accel) {
+void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, Acceleration acceleration) {
     if (gamepad.right_bumper && !prev_gamepad.right_bumper) robot->power += 5;
     if (gamepad.left_bumper && !prev_gamepad.left_bumper) robot->power -= 5;
     robot->power = constrain(robot->power, NEUTRAL_POWER, 1023);
@@ -237,19 +248,19 @@ void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, RawAccel r
     else if (gamepad.y) robot->power = 1023;
     else if (!gamepad.y && prev_gamepad.y) robot->power = GOOD_POWER;
 
-    if (ENABLE_TRIM) {
-        if (gamepad.start && !prev_gamepad.start) robot->radius_trim += 0.00025;
-        if (gamepad.back && !prev_gamepad.back) robot->radius_trim -= 0.00025;
-        if (gamepad.start && gamepad.back) robot->radius_trim = 0;
-    } else {
-        if (gamepad.start || gamepad.back) robot->power = NEUTRAL_POWER;
-        if (gamepad.start) robot->reversed = false;
-        if (gamepad.back) robot->reversed = true;
-    }
+    if (gamepad.dpad_right && !prev_gamepad.dpad_right) robot->radius_trim += 0.00025;
+    if (gamepad.dpad_left && !prev_gamepad.dpad_left) robot->radius_trim -= 0.00025;
+    if (gamepad.dpad_up) robot->radius_trim = 0;
+
+    if (gamepad.start) robot->reversed = false;
+    if (gamepad.back) robot->reversed = true;
+
+    auto magnitude = [](float x1, float x2) { return sqrt(sq(x1) + sq(x2)); };
+    auto math_mod = [](float x, float n) { return x - floor(x / n) * n; };
 
     // TODO: Move to controller parsing, we only need to do this on new packet
     float stick_angle = atan2(gamepad.left_y, gamepad.left_x);
-    float stick_magnitude = constrain(sqrt(sq(gamepad.left_x) + sq(gamepad.left_y)), 0, 1);
+    float stick_magnitude = constrain(magnitude(gamepad.left_x, gamepad.left_y), 0, 1);
 
     // Get time step
     long time_step = micros() - robot->last_melty_frame_time;
@@ -263,7 +274,7 @@ void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, RawAccel r
     }
 
     // Calculate change in angle
-    float cen_accel = accel_units_to_mps2(sqrt(fabs(sq((long)raw_accel.x) + sq((long)raw_accel.y)))); // TODO: do these have to be longs? probably dont need fabs
+    float cen_accel = magnitude(acceleration.x, acceleration.y);
 
     float angular_vel;
     if (robot->reversed) angular_vel = sqrt(fabs(cen_accel / ACCEL_RADIUS_REVERSE + robot->radius_trim)); // CCW
@@ -275,8 +286,6 @@ void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, RawAccel r
 
     // Turn heading
     if (fabs(gamepad.right_x) > 0.1) robot->angle += gamepad.right_x * 2 * PI * TURN_SPEED * time_step * 0.000001;
-
-    auto math_mod = [](float x, float n) { return x - floor(x / n) * n; };
 
     // Angle from the robot's angle to the joystick's angle, from [-PI, PI)
     float angle_diff = math_mod((stick_angle - robot->angle) + PI, 2 * PI) - PI;
@@ -379,10 +388,6 @@ void curvature_drive(Gamepad gamepad) {
     if (fabs(right_power) < 0.05) right_power = 0.05;
     Timer1.pwm(MOTOR_L, (int)fmap(left_power, -1, 1, 713, 793));
     Timer1.pwm(MOTOR_R, (int)fmap(right_power, -1, 1, 793, 713));
-}
-
-float accel_units_to_mps2(float native_units) {
-    return ((400.0 * (float)native_units) / 2047) * 9.80665;
 }
 
 float fmap(float val, float in_min, float in_max, float out_min, float out_max) {
