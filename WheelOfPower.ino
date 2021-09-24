@@ -50,36 +50,36 @@ enum class Mode { NO_PWM, MELTY, TANK };
 typedef struct {
     int16_t power;
     float angle;
-    float angularVel;
-    long lastMeltyFrameTime; // us
-    float radiusTrim;
+    float prev_ang_vel;
+    long last_melty_frame_time; // us
+    float radius_trim;
     bool reversed;
     Mode mode;
-} RobotState;
+} Robot;
 
 typedef struct {
-    byte hash;
+    byte pound;
 
-    byte leftX;
-    byte leftY;
-    byte rightX;
+    byte left_x;
+    byte left_y;
+    byte right_x;
 
-    bool aButton : 1;
-    bool bButton : 1;
-    bool xButton : 1;
-    bool yButton : 1;
-    bool leftBumper : 1;
-    bool rightBumper : 1;
-    bool leftTrigger : 1;
-    bool rightTrigger : 1;
+    bool a : 1;
+    bool b : 1;
+    bool x : 1;
+    bool y : 1;
+    bool left_bumper : 1;
+    bool right_bumper : 1;
+    bool left_trigger : 1;
+    bool right_trigger : 1;
 
-    bool dpadLeft: 1;
-    bool dpadRight: 1;
-    bool dpadUp: 1;
-    bool dpadDown: 1;
-    bool startButton : 1;
-    bool backButton : 1;
-    bool xboxButton : 1;
+    bool dpad_left: 1;
+    bool dpad_right: 1;
+    bool dpad_up : 1;
+    bool dpad_down: 1;
+    bool start : 1;
+    bool back : 1;
+    bool xbox : 1;
     bool empty : 1;
 
     byte dollar;
@@ -87,321 +87,315 @@ typedef struct {
 
 typedef struct {
     unsigned long timestamp;
-    float leftX;
-    float leftY;
-    float rightX;
-    bool aButton;
-    bool bButton;
-    bool xButton;
-    bool yButton;
-    bool leftBumper;
-    bool rightBumper;
-    bool leftTrigger;
-    bool rightTrigger;
-    bool dpadLeft;
-    bool dpadRight;
-    bool dpadUp;
-    bool dpadDown;
+    float left_x;
+    float left_y;
+    float right_x;
+    bool a;
+    bool b;
+    bool x;
+    bool y;
+    bool left_bumper;
+    bool right_bumper;
+    bool left_trigger;
+    bool right_trigger;
+    bool dpad_left;
+    bool dpad_right;
+    bool dpad_up ;
+    bool dpad_down;
     bool start;
     bool back;
     bool xbox;
-} ControllerState;
+} Gamepad;
 
 typedef struct {
     int16_t x;
     int16_t y;
     int16_t z;
-} AccelState;
+} RawAccel;
 
-RH_RF95 loRa(LORA_CS, LORA_DIO0);
-LIS331 accel;
+RH_RF95 lora(LORA_CS, LORA_DIO0);
+LIS331 accelerometer;
 
 void setup() {
     if (LORA_DEBUG || ACCEL_DEBUG || MOTOR_DEBUG) Serial.begin(115200);
-    initMotors();
-    initAccelerometer();
-    initLoRa();
+    init_motors();
+    init_accelerometer();
+    init_lora();
     pinMode(MELTY_LED_PIN, OUTPUT);
     pinMode(POWER_LED_PIN, OUTPUT);
     digitalWrite(POWER_LED_PIN, HIGH);
 }
 
 void loop() {
-    static ControllerState* controllerState = calloc(1, sizeof(ControllerState));
-    static ControllerState* lastControllerState = calloc(1, sizeof(ControllerState));
-    static AccelState* accelState = calloc(1, sizeof(AccelState));
-    static RobotState* robotState = calloc(1, sizeof(RobotState));
-    accelRecv(accelState);
-    getControllerState(&controllerState, &lastControllerState);
+    static Gamepad* gamepad = calloc(1, sizeof(Gamepad));
+    static Gamepad* prev_gamepad = calloc(1, sizeof(Gamepad));
+    static RawAccel* raw_accel = calloc(1, sizeof(RawAccel));
+    static Robot* robot = calloc(1, sizeof(Robot));
+    read_accel(raw_accel);
+    read_gamepad(&gamepad, &prev_gamepad);
 
-    if (controllerState->bButton) robotState->mode = Mode::TANK;
-    else if (controllerState->aButton || controllerState->xButton || controllerState->yButton) robotState->mode = Mode::MELTY;
+    if (gamepad->b) robot->mode = Mode::TANK;
+    else if (gamepad->a || gamepad->x || gamepad->y) robot->mode = Mode::MELTY;
 
-    if (robotState->mode == Mode::TANK) curvatureDrive(controllerState);
-    else if (robotState->mode == Mode::MELTY) meltyDrive(robotState, controllerState, lastControllerState, accelState);
-    else if (robotState->mode == Mode::NO_PWM) digitalWrite(MELTY_LED_PIN, HIGH);
+    if (robot->mode == Mode::TANK) curvature_drive(gamepad);
+    else if (robot->mode == Mode::MELTY) melty_drive(robot, gamepad, prev_gamepad, raw_accel);
+    else if (robot->mode == Mode::NO_PWM) digitalWrite(MELTY_LED_PIN, HIGH);
 }
 
-void initMotors() {
+void init_motors() {
     Timer1.initialize(MOTOR_PERIOD);
     if (MOTOR_DEBUG) Serial.println("Motors initialized");
 }
 
-void initAccelerometer() {
+void init_accelerometer() {
     pinMode(ACCEL_CS, OUTPUT);
     digitalWrite(ACCEL_CS, HIGH);
     pinMode(SPI_MOSI, OUTPUT);
     pinMode(SPI_MISO, INPUT);
     pinMode(SPI_SCK, OUTPUT);
     SPI.begin();
-    accel.setSPICSPin(ACCEL_CS);
-    while (!accel.begin(LIS331::USE_SPI)) {
+    accelerometer.setSPICSPin(ACCEL_CS);
+    while (!accelerometer.begin(LIS331::USE_SPI)) {
         if (ACCEL_DEBUG) Serial.println("Accelerometer init failed. Retrying...");
         delay(200);
     }
-    accel.setODR(accel.DR_1000HZ);
-    accel.setFullScale(accel.HIGH_RANGE);
+    accelerometer.setODR(accelerometer.DR_1000HZ);
+    accelerometer.setFullScale(accelerometer.HIGH_RANGE);
     if (ACCEL_DEBUG) Serial.println("Accelerometer initialized");
 }
 
-void initLoRa() {
+void init_lora() {
     if (LORA_DEBUG) Serial.print("LoRa initializing");
-    while (!loRa.init()) {
+    while (!lora.init()) {
         if (LORA_DEBUG) Serial.println("LoRa init failed. Retrying...");
         delay(200);
     }
-    loRa.setFrequency(915);
-    loRa.setSignalBandwidth(250000);
-    loRa.setSpreadingFactor(7);
-    loRa.setCodingRate4(5);
+    lora.setFrequency(915);
+    lora.setSignalBandwidth(250000);
+    lora.setSpreadingFactor(7);
+    lora.setCodingRate4(5);
     if (LORA_DEBUG) Serial.println("LoRa initialized");
 }
 
-void accelRecv(AccelState* accelState) {
+void read_accel(RawAccel* raw_accel) {
     // Prevents LoRa from taking over SPI from an interrupt while reading accelerometer, which makes the program hang
     SPI.beginTransaction(SPISettings(SPI_FREQUENCY, MSBFIRST, SPI_MODE0));
-    accel.readAxes(accelState->x, accelState->y, accelState->z);
+    accelerometer.readAxes(raw_accel->x, raw_accel->y, raw_accel->z);
     SPI.endTransaction();
     if (ACCEL_DEBUG) {
         Serial.print("X: ");
-        Serial.print(accelState->x);
+        Serial.print(raw_accel->x);
         Serial.print("\tY: ");
-        Serial.print(accelState->y);
+        Serial.print(raw_accel->y);
         Serial.print("\tZ: ");
-        Serial.println(accelState->z);
+        Serial.println(raw_accel->z);
     }
 }
 
-// TODO: call loRaRecv(), which should read a binary packet into a char buffer
-// then pass that sequence to parseControllerState() which puts it in a ControllerState
-void getControllerState(ControllerState** controllerState, ControllerState** lastControllerState) {
+void read_gamepad(Gamepad** gamepad, Gamepad** prev_gamepad) {
     // TODO: probably worth making sure that this isn't copying more than i expect
     // TODO: i could probably make this faster if i don't worry about memory use so much
-    //       idea: memcopy controllerState to lastControllerState, then read into controllerState
+    //       idea: memcopy gamepad to prev_gamepad, then read into gamepad
     //              - no more memcmp
     //              - still have to copy memory, but have to anyway
     Packet* packet = (Packet*)calloc(1, sizeof(Packet)); // TODO: wish this wasn't dynamically allocd
     uint8_t len = sizeof(Packet);                         // TODO: this isnt what the docs say to do, but the examples have it
-    if (loRa.recv((uint8_t*)packet, &len)) { // TODO: make sure we received the whole packet (check len?)
-        parseControllerState(packet, *lastControllerState);
-        ControllerState* temp = *controllerState;
-        *controllerState = *lastControllerState;
-        *lastControllerState = temp;
-    } else if (memcmp(*controllerState, *lastControllerState, sizeof(ControllerState)) != 0)
-        memcpy(*lastControllerState, *controllerState, sizeof(ControllerState));
+    if (lora.recv((uint8_t*)packet, &len)) { // TODO: make sure we received the whole packet (check len?)
+        parse_gamepad(packet, *prev_gamepad);
+        Gamepad* temp = *gamepad;
+        *gamepad = *prev_gamepad;
+        *prev_gamepad = temp;
+    } else if (memcmp(*gamepad, *prev_gamepad, sizeof(Gamepad)) != 0)
+        memcpy(*prev_gamepad, *gamepad, sizeof(Gamepad));
     free(packet);
 }
 
 /**
- * Parses a packet from LoRa and reads it into the specified ControllerState.
+ * Parses a packet from LoRa and reads it into the specified Gamepad.
  * Precondition: packet waiting in LoRa buffer
  */
-void parseControllerState(Packet* packet, ControllerState* controllerState) {
+void parse_gamepad(Packet* packet, Gamepad* gamepad) {
+    auto byte_to_axis = [](byte axis) { return axis == 127 ? 0 : constrain(((float)axis / 127.5) - 1, -1, 1); };
     // TODO: deadzone
-    controllerState->timestamp = millis();
-    controllerState->leftX = 0; // Only forward and backward translation
-    controllerState->leftY = -byteToAxis(packet->leftY); // Make +y forward
-    controllerState->rightX = byteToAxis(packet->rightX);
-    controllerState->aButton = packet->aButton;
-    controllerState->bButton = packet->bButton;
-    controllerState->xButton = packet->xButton;
-    controllerState->yButton = packet->yButton;
-    controllerState->leftBumper = packet->leftBumper;
-    controllerState->rightBumper = packet->rightBumper;
-    controllerState->leftTrigger = packet->leftTrigger;
-    controllerState->rightTrigger = packet->rightTrigger;
-    controllerState->dpadLeft = packet->dpadLeft;
-    controllerState->dpadRight = packet->dpadRight;
-    controllerState->dpadUp = packet->dpadUp;
-    controllerState->dpadDown = packet->dpadDown;
-    controllerState->start = packet->startButton;
-    controllerState->back = packet->backButton;
-    controllerState->xbox = packet->xboxButton;
-}
-
-// TODO: Make this a parseControllerState lambda
-float byteToAxis(byte axis) {
-    return axis == 127 ? 0 : constrain(((float)axis / 127.5) - 1, -1, 1);
+    gamepad->timestamp = millis();
+    gamepad->left_x = 0; // Only forward and backward translation
+    gamepad->left_y = -byte_to_axis(packet->left_y); // Make +y forward
+    gamepad->right_x = byte_to_axis(packet->right_x);
+    gamepad->a = packet->a;
+    gamepad->b = packet->b;
+    gamepad->x = packet->x;
+    gamepad->y = packet->y;
+    gamepad->left_bumper = packet->left_bumper;
+    gamepad->right_bumper = packet->right_bumper;
+    gamepad->left_trigger = packet->left_trigger;
+    gamepad->right_trigger = packet->right_trigger;
+    gamepad->dpad_left = packet->dpad_left;
+    gamepad->dpad_right = packet->dpad_right;
+    gamepad->dpad_up  = packet->dpad_up ;
+    gamepad->dpad_down = packet->dpad_down;
+    gamepad->start = packet->start;
+    gamepad->back = packet->back;
+    gamepad->xbox = packet->xbox;
 }
 
 // TODO: Optimize
 // Benchmark, make changes from float to integer math
-void meltyDrive(RobotState* robotState, ControllerState* controllerState, ControllerState* lastControllerState, AccelState* accelState) {
-    if (controllerState->rightBumper && !lastControllerState->rightBumper) robotState->power += 5;
-    if (controllerState->leftBumper && !lastControllerState->leftBumper) robotState->power -= 5;
-    robotState->power = constrain(robotState->power, NEUTRAL_POWER, 1023);
+void melty_drive(Robot* robot, Gamepad* gamepad, Gamepad* prev_gamepad, RawAccel* raw_accel) {
+    if (gamepad->right_bumper && !prev_gamepad->right_bumper) robot->power += 5;
+    if (gamepad->left_bumper && !prev_gamepad->left_bumper) robot->power -= 5;
+    robot->power = constrain(robot->power, NEUTRAL_POWER, 1023);
 
-    if (controllerState->aButton) robotState->power = NEUTRAL_POWER;
-    else if (controllerState->xButton) robotState->power = GOOD_POWER;
-    else if (controllerState->yButton) robotState->power = 1023;
-    else if (!controllerState->yButton && lastControllerState->yButton) robotState->power = GOOD_POWER;
+    if (gamepad->a) robot->power = NEUTRAL_POWER;
+    else if (gamepad->x) robot->power = GOOD_POWER;
+    else if (gamepad->y) robot->power = 1023;
+    else if (!gamepad->y && prev_gamepad->y) robot->power = GOOD_POWER;
 
     if (ENABLE_TRIM) {
-        if (controllerState->start && !lastControllerState->start) robotState->radiusTrim += 0.00025;
-        if (controllerState->back && !lastControllerState->back) robotState->radiusTrim -= 0.00025;
-        if (controllerState->start && controllerState->back) robotState->radiusTrim = 0;
+        if (gamepad->start && !prev_gamepad->start) robot->radius_trim += 0.00025;
+        if (gamepad->back && !prev_gamepad->back) robot->radius_trim -= 0.00025;
+        if (gamepad->start && gamepad->back) robot->radius_trim = 0;
     } else {
-        if (controllerState->start || controllerState->back) robotState->power = NEUTRAL_POWER;
-        if (controllerState->start) robotState->reversed = false;
-        if (controllerState->back) robotState->reversed = true;
+        if (gamepad->start || gamepad->back) robot->power = NEUTRAL_POWER;
+        if (gamepad->start) robot->reversed = false;
+        if (gamepad->back) robot->reversed = true;
     }
 
     // TODO: Move to controller parsing, we only need to do this on new packet
-    float joystickAngle = atan2(controllerState->leftY, controllerState->leftX);
-    float joystickMagnitude = constrain(sqrt(sq(controllerState->leftX) + sq(controllerState->leftY)), 0, 1);
+    float stick_angle = atan2(gamepad->left_y, gamepad->left_x);
+    float stick_magnitude = constrain(sqrt(sq(gamepad->left_x) + sq(gamepad->left_y)), 0, 1);
 
     // Get time step
-    long deltaTime = micros() - robotState->lastMeltyFrameTime;
-    robotState->lastMeltyFrameTime = micros();
-    if (deltaTime > 500000) {
+    long time_step = micros() - robot->last_melty_frame_time;
+    robot->last_melty_frame_time = micros();
+    if (time_step > 500000) {
         // Just switched to melty mode, bad frame
-        deltaTime = 0;
-        robotState->angle = 0;
-        robotState->power = NEUTRAL_POWER;
-        robotState->reversed = false;
+        time_step = 0;
+        robot->angle = 0;
+        robot->power = NEUTRAL_POWER;
+        robot->reversed = false;
     }
 
     // Calculate change in angle
-    float cenAcc = accelUnitsToMS2(sqrt(fabs(sq((long)accelState->x) + sq((long)accelState->y)))); // TODO: do these have to be longs? probably dont need fabs
+    float cen_accel = accel_units_to_mps2(sqrt(fabs(sq((long)raw_accel->x) + sq((long)raw_accel->y)))); // TODO: do these have to be longs? probably dont need fabs
 
-    float angularVel;
-    if (robotState->reversed) angularVel = sqrt(fabs(cenAcc / ACCEL_RADIUS_REVERSE + robotState->radiusTrim)); // CCW
-    else angularVel = -sqrt(fabs(cenAcc / ACCEL_RADIUS + robotState->radiusTrim)); // CW
+    float angular_vel;
+    if (robot->reversed) angular_vel = sqrt(fabs(cen_accel / ACCEL_RADIUS_REVERSE + robot->radius_trim)); // CCW
+    else angular_vel = -sqrt(fabs(cen_accel / ACCEL_RADIUS + robot->radius_trim)); // CW
 
-    float deltaAngle = ((angularVel + robotState->angularVel) * 0.5) * (deltaTime * 0.000001);
-    robotState->angle += deltaAngle;
-    robotState->angularVel = angularVel;
+    float delta_angle = ((angular_vel + robot->prev_ang_vel) * 0.5) * (time_step * 0.000001);
+    robot->angle += delta_angle;
+    robot->prev_ang_vel = angular_vel;
 
     // Turn heading
-    if (fabs(controllerState->rightX) > 0.1) robotState->angle += controllerState->rightX * 2 * PI * TURN_SPEED * deltaTime * 0.000001;
+    if (fabs(gamepad->right_x) > 0.1) robot->angle += gamepad->right_x * 2 * PI * TURN_SPEED * time_step * 0.000001;
 
     auto math_mod = [](float x, float n) { return x - floor(x / n) * n; };
 
     // Angle from the robot's angle to the joystick's angle, from [-PI, PI)
-    float angleDifference = math_mod((joystickAngle - robotState->angle) + PI, 2 * PI) - PI;
+    float angle_diff = math_mod((stick_angle - robot->angle) + PI, 2 * PI) - PI;
 
-    robotState->power = constrain(robotState->power, NEUTRAL_POWER, 1023);
+    robot->power = constrain(robot->power, NEUTRAL_POWER, 1023);
 
     // Draw arc
-    float melty_led_angle = math_mod(robotState->angle + MELTY_LED_OFFSET, 2.0 * PI);
+    float melty_led_angle = math_mod(robot->angle + MELTY_LED_OFFSET, 2.0 * PI);
     if (melty_led_angle > 0.25 * PI && melty_led_angle < 0.75 * PI) digitalWrite(MELTY_LED_PIN, HIGH);
     else digitalWrite(MELTY_LED_PIN, LOW);
 
     // Set motor speed
-    if (millis() - controllerState->timestamp > 1000) {
-        robotState->power = NEUTRAL_POWER;
-        setMotorsMelty(robotState->power, robotState->power, robotState->reversed);
+    if (millis() - gamepad->timestamp > 1000) {
+        robot->power = NEUTRAL_POWER;
+        set_motors_melty(robot->power, robot->power, robot->reversed);
     } else {
-        if (fabs(controllerState->leftX) < 0.1 && fabs(controllerState->leftY) < 0.1) {
-            setMotorsMelty(robotState->power, robotState->power, robotState->reversed);
+        if (fabs(gamepad->left_x) < 0.1 && fabs(gamepad->left_y) < 0.1) {
+            set_motors_melty(robot->power, robot->power, robot->reversed);
         } else {
-            int deflection = ((robotState->power - NEUTRAL_POWER) * fmap(joystickMagnitude, 0, 1, 0, 0.5));
-            if (angleDifference < 0) setMotorsMelty(robotState->power + (deflection * 3), robotState->power - deflection, robotState->reversed); // 50-250
-            else setMotorsMelty(robotState->power - deflection, robotState->power + (deflection * 3), robotState->reversed);
+            int deflection = ((robot->power - NEUTRAL_POWER) * fmap(stick_magnitude, 0, 1, 0, 0.5));
+            if (angle_diff < 0) set_motors_melty(robot->power + (deflection * 3), robot->power - deflection, robot->reversed); // 50-250
+            else set_motors_melty(robot->power - deflection, robot->power + (deflection * 3), robot->reversed);
         }
     }
 }
 
 // NEUTRAL_POWER...1023
-void setMotorsMelty(int leftPower, int rightPower, bool reversed) {
+void set_motors_melty(int left_power, int right_power, bool reversed) {
     if (reversed) {
-        leftPower = NEUTRAL_POWER - (leftPower - NEUTRAL_POWER);
-        rightPower = NEUTRAL_POWER - (rightPower - NEUTRAL_POWER);
-        Timer1.pwm(MOTOR_L, constrain(leftPower, 520, NEUTRAL_POWER));
-        Timer1.pwm(MOTOR_R, constrain(rightPower, 520, NEUTRAL_POWER));
+        left_power = NEUTRAL_POWER - (left_power - NEUTRAL_POWER);
+        right_power = NEUTRAL_POWER - (right_power - NEUTRAL_POWER);
+        Timer1.pwm(MOTOR_L, constrain(left_power, 520, NEUTRAL_POWER));
+        Timer1.pwm(MOTOR_R, constrain(right_power, 520, NEUTRAL_POWER));
     } else {
-        Timer1.pwm(MOTOR_L, constrain(leftPower, NEUTRAL_POWER, 1023));
-        Timer1.pwm(MOTOR_R, constrain(rightPower, NEUTRAL_POWER, 1023));
+        Timer1.pwm(MOTOR_L, constrain(left_power, NEUTRAL_POWER, 1023));
+        Timer1.pwm(MOTOR_R, constrain(right_power, NEUTRAL_POWER, 1023));
     }
 }
 
-float quickStopThreshold = 0.2;
-float quickStopAlpha = 0.1;
-float quickStopAccumulator;
-float invertedReverse = false;
-float quickTurnThreshold = 0.2;
+float quick_stop_threshold = 0.2;
+float quick_stop_alpha = 0.1;
+float quick_stop_accumulator;
+float inverted_reverse = false;
+float quick_turn_threshold = 0.2;
 
-void curvatureDrive(ControllerState* controllerState) {
-    float angularPower;
-    boolean overPower;
-    float throttle = controllerState->leftY;
-    float rotation = controllerState->rightX;
+void curvature_drive(Gamepad* gamepad) {
+    float angular_power;
+    boolean over_power;
+    float throttle = gamepad->left_y;
+    float rotation = gamepad->right_x;
     // rotation *= 0.5;
     if (fabs(throttle) < 0.1) throttle = 0;
     if (fabs(rotation) < 0.1) rotation = 0;
-    if (throttle < quickTurnThreshold) {
-        if (fabs(throttle) < quickStopThreshold)
-            quickStopAccumulator = (1 - quickStopAlpha) * quickStopAccumulator + quickStopAlpha * rotation * 2;
-        overPower = true;
-        angularPower = rotation;
+    if (throttle < quick_turn_threshold) {
+        if (fabs(throttle) < quick_stop_threshold)
+            quick_stop_accumulator = (1 - quick_stop_alpha) * quick_stop_accumulator + quick_stop_alpha * rotation * 2;
+        over_power = true;
+        angular_power = rotation;
     } else {
-        overPower = false;
-        angularPower = fabs(throttle) * rotation - quickStopAccumulator;
+        over_power = false;
+        angular_power = fabs(throttle) * rotation - quick_stop_accumulator;
     }
-    if (quickStopAccumulator > 1) quickStopAccumulator--;
-    else if (quickStopAccumulator < -1) quickStopAccumulator++;
-    else quickStopAccumulator = 0;
-    float leftPower;
-    float rightPower;
-    if (throttle < 0 && invertedReverse) {
-        leftPower = throttle - angularPower;
-        rightPower = throttle + angularPower;
+    if (quick_stop_accumulator > 1) quick_stop_accumulator--;
+    else if (quick_stop_accumulator < -1) quick_stop_accumulator++;
+    else quick_stop_accumulator = 0;
+    float left_power;
+    float right_power;
+    if (throttle < 0 && inverted_reverse) {
+        left_power = throttle - angular_power;
+        right_power = throttle + angular_power;
     } else {
-        leftPower = throttle + angularPower;
-        rightPower = throttle - angularPower;
+        left_power = throttle + angular_power;
+        right_power = throttle - angular_power;
     }
-    if (throttle < 0 && invertedReverse) {
-        leftPower = -leftPower;
-        rightPower = -rightPower;
+    if (throttle < 0 && inverted_reverse) {
+        left_power = -left_power;
+        right_power = -right_power;
     }
-    if (overPower) {
-        if (leftPower > 1) {
-            rightPower -= leftPower - 1;
-            leftPower = 1;
-        } else if (rightPower > 1) {
-            leftPower -= rightPower - 1;
-            rightPower = 1;
-        } else if (leftPower < -1) {
-            rightPower -= leftPower + 1;
-            leftPower = -1;
-        } else if (rightPower < -1) {
-            leftPower -= rightPower + 1;
-            rightPower = -1;
+    if (over_power) {
+        if (left_power > 1) {
+            right_power -= left_power - 1;
+            left_power = 1;
+        } else if (right_power > 1) {
+            left_power -= right_power - 1;
+            right_power = 1;
+        } else if (left_power < -1) {
+            right_power -= left_power + 1;
+            left_power = -1;
+        } else if (right_power < -1) {
+            left_power -= right_power + 1;
+            right_power = -1;
         }
     }
-    float maxMagnitude = max(fabs(leftPower), fabs(rightPower));
-    if (maxMagnitude > 1) {
-        leftPower /= maxMagnitude;
-        rightPower /= maxMagnitude;
+    float max_magnitude = max(fabs(left_power), fabs(right_power));
+    if (max_magnitude > 1) {
+        left_power /= max_magnitude;
+        right_power /= max_magnitude;
     }
-    if (fabs(leftPower) < 0.05) leftPower = 0.05;
-    if (fabs(rightPower) < 0.05) rightPower = 0.05;
-    Timer1.pwm(MOTOR_L, (int)fmap(leftPower, -1, 1, 713, 793));
-    Timer1.pwm(MOTOR_R, (int)fmap(rightPower, -1, 1, 793, 713));
+    if (fabs(left_power) < 0.05) left_power = 0.05;
+    if (fabs(right_power) < 0.05) right_power = 0.05;
+    Timer1.pwm(MOTOR_L, (int)fmap(left_power, -1, 1, 713, 793));
+    Timer1.pwm(MOTOR_R, (int)fmap(right_power, -1, 1, 793, 713));
 }
 
-float accelUnitsToMS2(float nativeUnits) {
-    return ((400.0 * (float)nativeUnits) / 2047) * 9.80665;
+float accel_units_to_mps2(float native_units) {
+    return ((400.0 * (float)native_units) / 2047) * 9.80665;
 }
 
 float fmap(float val, float in_min, float in_max, float out_min, float out_max) {
