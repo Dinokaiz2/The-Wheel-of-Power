@@ -47,7 +47,7 @@ constexpr int SPI_FREQUENCY = 1000000;
 
 enum class Mode { NO_PWM, MELTY, TANK };
 
-typedef struct {
+struct Robot {
     int16_t power;
     float angle;
     float prev_ang_vel;
@@ -55,9 +55,9 @@ typedef struct {
     float radius_trim;
     bool reversed;
     Mode mode;
-} Robot;
+};
 
-typedef struct {
+struct Packet {
     byte pound;
 
     byte left_x;
@@ -83,9 +83,9 @@ typedef struct {
     bool empty : 1;
 
     byte dollar;
-} Packet;
+};
 
-typedef struct {
+struct Gamepad {
     unsigned long timestamp;
     float left_x;
     float left_y;
@@ -105,13 +105,13 @@ typedef struct {
     bool start;
     bool back;
     bool xbox;
-} Gamepad;
+};
 
-typedef struct {
+struct RawAccel {
     int16_t x;
     int16_t y;
     int16_t z;
-} RawAccel;
+};
 
 RH_RF95 lora(LORA_CS, LORA_DIO0);
 LIS331 accelerometer;
