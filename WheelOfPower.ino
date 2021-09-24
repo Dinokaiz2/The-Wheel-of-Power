@@ -59,17 +59,29 @@ typedef struct {
 
 typedef struct {
     byte hash;
+
     byte leftX;
     byte leftY;
     byte rightX;
-    bool start : 1;
-    bool back : 1;
-    bool yButton : 1;
-    bool xButton : 1;
-    bool bButton : 1;
+
     bool aButton : 1;
-    bool rightBumper : 1;
+    bool bButton : 1;
+    bool xButton : 1;
+    bool yButton : 1;
     bool leftBumper : 1;
+    bool rightBumper : 1;
+    bool leftTrigger : 1;
+    bool rightTrigger : 1;
+
+    bool dpadLeft: 1;
+    bool dpadRight: 1;
+    bool dpadUp: 1;
+    bool dpadDown: 1;
+    bool startButton : 1;
+    bool backButton : 1;
+    bool xboxButton : 1;
+    bool empty : 1;
+
     byte dollar;
 } Packet;
 
@@ -78,18 +90,21 @@ typedef struct {
     float leftX;
     float leftY;
     float rightX;
-    bool leftBumper;
-    bool rightBumper;
-    bool dpadLeft;
-    bool dpadRight;
-    bool dpadUp;
-    bool dpadDown;
     bool aButton;
     bool bButton;
     bool xButton;
     bool yButton;
+    bool leftBumper;
+    bool rightBumper;
+    bool leftTrigger;
+    bool rightTrigger;
+    bool dpadLeft;
+    bool dpadRight;
+    bool dpadUp;
+    bool dpadDown;
     bool start;
     bool back;
+    bool xbox;
 } ControllerState;
 
 typedef struct {
@@ -207,14 +222,21 @@ void parseControllerState(Packet* packet, ControllerState* controllerState) {
     controllerState->leftX = 0; // Only forward and backward translation
     controllerState->leftY = -byteToAxis(packet->leftY); // Make +y forward
     controllerState->rightX = byteToAxis(packet->rightX);
-    controllerState->leftBumper = packet->leftBumper;
-    controllerState->rightBumper = packet->rightBumper;
     controllerState->aButton = packet->aButton;
     controllerState->bButton = packet->bButton;
     controllerState->xButton = packet->xButton;
     controllerState->yButton = packet->yButton;
-    controllerState->start = packet->start;
-    controllerState->back = packet->back;
+    controllerState->leftBumper = packet->leftBumper;
+    controllerState->rightBumper = packet->rightBumper;
+    controllerState->leftTrigger = packet->leftTrigger;
+    controllerState->rightTrigger = packet->rightTrigger;
+    controllerState->dpadLeft = packet->dpadLeft;
+    controllerState->dpadRight = packet->dpadRight;
+    controllerState->dpadUp = packet->dpadUp;
+    controllerState->dpadDown = packet->dpadDown;
+    controllerState->start = packet->startButton;
+    controllerState->back = packet->backButton;
+    controllerState->xbox = packet->xboxButton;
 }
 
 // TODO: Make this a parseControllerState lambda
