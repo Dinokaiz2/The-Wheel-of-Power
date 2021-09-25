@@ -5,8 +5,7 @@
 #include <stdlib.h>
 
 // Settings
-constexpr uint16_t GOOD_POWER = 803;
-constexpr uint16_t NEUTRAL_POWER = 753;
+constexpr float GOOD_POWER = 0.18;
 constexpr float TURN_SPEED = 1.3;
 
 constexpr float ACCEL_RADIUS = 0.06108; // meters
@@ -43,12 +42,16 @@ constexpr float MOTOR_FREQ = 4000.0;
 constexpr float MOTOR_PERIOD = (1 / MOTOR_FREQ * 1000000); // 250 us
 constexpr uint8_t MOTOR_RES = 10; // bit resolution
 
+constexpr uint16_t MIN_DUTY = 520;
+constexpr uint16_t NEUTRAL_DUTY = 753;
+constexpr uint16_t MAX_DUTY = 1023;
+
 constexpr int SPI_FREQUENCY = 1000000;
 
 enum class Mode { NO_PWM, MELTY, TANK };
 
 struct Robot {
-    int16_t power;
+    float power;
     float angle;
     float prev_ang_vel;
     long last_melty_frame_time; // us
@@ -239,21 +242,25 @@ void parse_gamepad(Packet packet, Gamepad* gamepad) {
 // TODO: Optimize
 // Benchmark, make changes from float to integer math
 void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, Acceleration acceleration) {
-    if (gamepad.right_bumper && !prev_gamepad.right_bumper) robot->power += 5;
-    if (gamepad.left_bumper && !prev_gamepad.left_bumper) robot->power -= 5;
-    robot->power = constrain(robot->power, NEUTRAL_POWER, 1023);
+    if (gamepad.right_bumper && !prev_gamepad.right_bumper) robot->power += 0.02;
+    if (gamepad.left_bumper && !prev_gamepad.left_bumper) robot->power -= 0.02;
+    robot->power = constrain(robot->power, 0, 1);
 
-    if (gamepad.a) robot->power = NEUTRAL_POWER;
+    if (gamepad.a) robot->power = 0;
     else if (gamepad.x) robot->power = GOOD_POWER;
-    else if (gamepad.y) robot->power = 1023;
-    else if (!gamepad.y && prev_gamepad.y) robot->power = GOOD_POWER;
+
+    if (gamepad.y || gamepad.start) robot->power = 1;
+    if (gamepad.y) robot->reversed = false;
+    if (gamepad.start) robot->reversed = true;
+
+    if (!gamepad.y && prev_gamepad.y) robot->power = GOOD_POWER;
+    if (!gamepad.start && prev_gamepad.start) robot->power = GOOD_POWER;
+
 
     if (gamepad.dpad_right && !prev_gamepad.dpad_right) robot->radius_trim += 0.00025;
     if (gamepad.dpad_left && !prev_gamepad.dpad_left) robot->radius_trim -= 0.00025;
     if (gamepad.dpad_up) robot->radius_trim = 0;
 
-    if (gamepad.start) robot->reversed = false;
-    if (gamepad.back) robot->reversed = true;
 
     auto magnitude = [](float x1, float x2) { return sqrt(sq(x1) + sq(x2)); };
     auto math_mod = [](float x, float n) { return x - floor(x / n) * n; };
@@ -269,8 +276,7 @@ void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, Accelerati
         // Just switched to melty mode, bad frame
         time_step = 0;
         robot->angle = 0;
-        robot->power = NEUTRAL_POWER;
-        robot->reversed = false;
+        robot->power = 0;
     }
 
     // Calculate change in angle
@@ -290,8 +296,6 @@ void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, Accelerati
     // Angle from the robot's angle to the joystick's angle, from [-PI, PI)
     float angle_diff = math_mod((stick_angle - robot->angle) + PI, 2 * PI) - PI;
 
-    robot->power = constrain(robot->power, NEUTRAL_POWER, 1023);
-
     // Draw arc
     float melty_led_angle = math_mod(robot->angle + MELTY_LED_OFFSET, 2.0 * PI);
     if (melty_led_angle > 0.25 * PI && melty_led_angle < 0.75 * PI) digitalWrite(MELTY_LED_PIN, HIGH);
@@ -299,29 +303,29 @@ void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, Accelerati
 
     // Set motor speed
     if (millis() - gamepad.timestamp > 1000) {
-        robot->power = NEUTRAL_POWER;
+        robot->power = 0;
         set_motors_melty(robot->power, robot->power, robot->reversed);
     } else {
         if (fabs(gamepad.left_x) < 0.1 && fabs(gamepad.left_y) < 0.1) {
             set_motors_melty(robot->power, robot->power, robot->reversed);
         } else {
-            int deflection = ((robot->power - NEUTRAL_POWER) * fmap(stick_magnitude, 0, 1, 0, 0.5));
-            if (angle_diff < 0) set_motors_melty(robot->power + (deflection * 3), robot->power - deflection, robot->reversed); // 50-250
-            else set_motors_melty(robot->power - deflection, robot->power + (deflection * 3), robot->reversed);
+            float deflection = robot->power * fmap(stick_magnitude, 0, 1, 0, 0.5);
+            if (angle_diff < 0) set_motors_melty(robot->power + deflection * 3, robot->power - deflection, robot->reversed); // 50-250
+            else set_motors_melty(robot->power - deflection, robot->power + deflection * 3, robot->reversed);
         }
     }
 }
 
-// NEUTRAL_POWER...1023
-void set_motors_melty(int left_power, int right_power, bool reversed) {
+// -1...1
+void set_motors_melty(float left_power, float right_power, bool reversed) {
+    uint16_t left_power_raw = reversed ? fmap(left_power, 0, 1, NEUTRAL_DUTY, MIN_DUTY) : fmap(left_power, 0, 1, NEUTRAL_DUTY, MAX_DUTY);
+    uint16_t right_power_raw = reversed ? fmap(right_power, 0, 1, NEUTRAL_DUTY, MIN_DUTY) : fmap(right_power, 0, 1, NEUTRAL_DUTY, MAX_DUTY);
     if (reversed) {
-        left_power = NEUTRAL_POWER - (left_power - NEUTRAL_POWER);
-        right_power = NEUTRAL_POWER - (right_power - NEUTRAL_POWER);
-        Timer1.pwm(MOTOR_L, constrain(left_power, 520, NEUTRAL_POWER));
-        Timer1.pwm(MOTOR_R, constrain(right_power, 520, NEUTRAL_POWER));
+        Timer1.pwm(MOTOR_L, left_power_raw);
+        Timer1.pwm(MOTOR_R, right_power_raw);
     } else {
-        Timer1.pwm(MOTOR_L, constrain(left_power, NEUTRAL_POWER, 1023));
-        Timer1.pwm(MOTOR_R, constrain(right_power, NEUTRAL_POWER, 1023));
+        Timer1.pwm(MOTOR_L, left_power_raw);
+        Timer1.pwm(MOTOR_R, right_power_raw);
     }
 }
 
