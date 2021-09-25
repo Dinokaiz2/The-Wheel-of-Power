@@ -8,8 +8,10 @@
 constexpr float GOOD_POWER = 0.18;
 constexpr float TURN_SPEED = 1.3;
 
-constexpr float ACCEL_RADIUS = 0.06108; // meters
-constexpr float ACCEL_RADIUS_REVERSE = 0.06033;
+constexpr float ACCEL_RADIUS = 0.061755; // meters
+constexpr float ACCEL_RADIUS_REVERSE = 0.06333;
+
+constexpr float MOTOR_LAG_ANGLE = 0.6; // radians
 
 bool ENABLE_TRIM = false;
 
@@ -139,7 +141,7 @@ void loop() {
     read_gamepad(&gamepad, &prev_gamepad);
 
     if (gamepad.b) robot.mode = Mode::TANK;
-    else if (gamepad.a || gamepad.x || gamepad.y) robot.mode = Mode::MELTY;
+    else if (gamepad.a || gamepad.x || gamepad.y || gamepad.start) robot.mode = Mode::MELTY;
 
     if (robot.mode == Mode::TANK) curvature_drive(gamepad);
     else if (robot.mode == Mode::MELTY) melty_drive(&robot, gamepad, prev_gamepad, acceleration);
@@ -269,6 +271,10 @@ void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, Accelerati
     float stick_angle = atan2(gamepad.left_y, gamepad.left_x);
     float stick_magnitude = constrain(magnitude(gamepad.left_x, gamepad.left_y), 0, 1);
 
+    // TODO: This is the reverse of what expect. Either I misunderstand or this isn't because of motor lag.
+    // Compensate for how long it takes for the motors to accelerate/decelerate
+    stick_angle -= MOTOR_LAG_ANGLE * (robot->reversed ? -1 : 1);
+
     // Get time step
     long time_step = micros() - robot->last_melty_frame_time;
     robot->last_melty_frame_time = micros();
@@ -283,8 +289,8 @@ void melty_drive(Robot* robot, Gamepad gamepad, Gamepad prev_gamepad, Accelerati
     float cen_accel = magnitude(acceleration.x, acceleration.y);
 
     float angular_vel;
-    if (robot->reversed) angular_vel = sqrt(fabs(cen_accel / ACCEL_RADIUS_REVERSE + robot->radius_trim)); // CCW
-    else angular_vel = -sqrt(fabs(cen_accel / ACCEL_RADIUS + robot->radius_trim)); // CW
+    if (robot->reversed) angular_vel = sqrt(fabs(cen_accel / (ACCEL_RADIUS_REVERSE + robot->radius_trim))); // CCW
+    else angular_vel = -sqrt(fabs(cen_accel / (ACCEL_RADIUS + robot->radius_trim))); // CW
 
     float delta_angle = ((angular_vel + robot->prev_ang_vel) * 0.5) * (time_step * 0.000001);
     robot->angle += delta_angle;
